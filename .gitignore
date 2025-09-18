@@ -1,0 +1,23 @@
+cat <<EOL > .gitignore
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.sqlite3
+*.db
+
+# Virtual env
+.venv/
+env/
+venv/
+
+# Logs & outputs
+logs/
+output/
+
+# Env files
+.env
+*.env
+EOL
+

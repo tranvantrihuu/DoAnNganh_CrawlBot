@@ -1,0 +1,1754 @@
+<!doctype html>
+<html lang="vi">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Phân tích theo ngành – One Page</title>
+
+  <!-- Tailwind CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+
+  <!-- CSS riêng (cùng thư mục với index.html) -->
+  <link rel="stylesheet" href="/web/styles.css" />
+
+<!-- React 17 + ReactDOM 17 (PHẢI trước Recharts) -->
+<script crossorigin src="https://unpkg.com/react@17/umd/react.development.js"></script>
+<script crossorigin src="https://unpkg.com/react-dom@17/umd/react-dom.development.js"></script>
+<script crossorigin src="https://unpkg.com/react-is@18/umd/react-is.production.min.js"></script>
+<!-- Recharts UMD (PHẢI sau React/ReactDOM) -->
+<script src="https://cdn.jsdelivr.net/npm/recharts/umd/Recharts.min.js"></script>
+
+<!-- Babel để chạy JSX (đặt cuối cùng trong head) -->
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+</head>
+
+<body class="min-h-screen">
+  <!-- Gradient nền + bóng tròn phát sáng -->
+  <div class="bg-canvas">
+    <div class="blob bl-left"></div>
+    <div class="blob bl-right"></div>
+  </div>
+
+  <!-- Nội dung chính -->
+  <div class="min-h-screen">
+    <div id="root" class="max-w-6xl mx-auto p-4 md:p-8"></div>
+  </div>
+
+  <!-- Ứng dụng React -->
+  <script type="text/babel">
+    const { useState, useEffect, useMemo, useRef } = React;
+    const API = '';
+
+    async function api(path){
+      const res = await fetch(API + path);
+      if(!res.ok) throw new Error(await res.text());
+      return res.json();
+    }
+
+    function App() {
+      const [all, setAll] = React.useState([]);     // danh sách ngành (từ server)
+      const [q, setQ] = React.useState('');
+      const [pick, setPick] = React.useState('');
+      const [data, setData] = React.useState(null);
+      const [loading, setLoading] = React.useState(false);
+      const [error, setError] = React.useState('');
+
+      // ==== AUTOCOMPLETE: state & helpers ====
+      const [sugs, setSugs] = React.useState([]);
+      const [showSug, setShowSug] = React.useState(false);
+      const [activeIdx, setActiveIdx] = React.useState(-1);
+      const sugAbortRef = React.useRef(null);
+      const searchAbortRef = React.useRef(null);
+
+      // helper gọi API đơn giản
+      const api = React.useCallback(async (url) => {
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        return res.json();
+      }, []);
+
+      async function fetchSugs(query) {
+        if (sugAbortRef.current) sugAbortRef.current.abort();
+        const ctrl = new AbortController();
+        sugAbortRef.current = ctrl;
+        if (!query.trim()) {
+          setSugs([]);
+          return;
+        }
+        try {
+          const res = await fetch(`/api/industries?q=${encodeURIComponent(query)}`, {signal: ctrl.signal});
+          const j = await res.json();
+          setSugs(j.items || []);
+        } catch (_) {
+          /* bỏ qua khi abort */
+        }
+      }
+
+      const onSearch = React.useCallback(async (slugArg) => {
+        const slug = (slugArg ?? pick)?.trim();
+        if (!slug) return;
+
+        // Huỷ request cũ nếu còn
+        if (searchAbortRef.current) searchAbortRef.current.abort();
+        const ctrl = new AbortController();
+        searchAbortRef.current = ctrl;
+
+        setLoading(true);
+        setError('');
+        try {
+          const res = await fetch(`/api/analysis/${encodeURIComponent(slug)}`, {signal: ctrl.signal});
+          if (!res.ok) throw new Error(`HTTP ${res.status}`);
+          const j = await res.json();
+          setData(j);
+        } catch (err) {
+          if (err.name !== 'AbortError') setError('Có lỗi khi tải dữ liệu.');
+        } finally {
+          setLoading(false);
+        }
+      }, [pick]);
+
+      function pickSlug(slug, label) {
+        setPick(slug);
+        setQ(label || "");
+        setShowSug(false);
+        onSearch(slug); // ✅ chỉ gọi 1 lần
+      }
+
+      function GlassSelect({value, onChange, options, placeholder = "Lựa chọn ngành"}) {
+        const [open, setOpen] = React.useState(false);
+        const [hover, setHover] = React.useState(-1);
+        const wrapRef = React.useRef(null);
+
+        React.useEffect(() => {
+          const onClick = (e) => {
+            if (!wrapRef.current?.contains(e.target)) setOpen(false);
+          };
+          window.addEventListener('click', onClick);
+          return () => window.removeEventListener('click', onClick);
+        }, []);
+
+        const pickOption = (slug) => {
+          onChange(slug);
+          setOpen(false);
+        };
+
+        return (
+                <div ref={wrapRef} className="relative">
+                  {/* Control */}
+                  <button
+                          type="button"
+                          className="mt-1 w-full px-3 py-2 rounded-xl border bg-white/70 text-left
+                   focus:outline-none"
+                          onClick={() => setOpen(o => !o)}
+                  >
+                    {options.find(o => o.slug === value)?.label || placeholder}
+                  </button>
+
+                  {/* Panel glass */}
+                  {open && (
+                          <div
+                                  className="absolute z-[5000] mt-2 w-full rounded-2xl p-1 border shadow-xl"
+                                  style={{
+                                    background: 'rgba(62,191,250,0.9)',   // đục hơn (ít trong suốt)
+                                    backdropFilter: 'blur(100px)',           // mờ bên dưới
+                                    WebkitBackdropFilter: 'blur(20px)',
+                                    borderColor: 'var(--glass-border)',
+                                    boxShadow: 'var(--shadow-strong)'
+                                  }}
+                                  role="listbox"
+                          >
+                            <ul className="max-h-72 overflow-auto">
+                              <li
+                                      className="px-3 py-2 rounded-lg text-slate-500"
+                                      onMouseEnter={() => setHover(-1)}
+                                      onMouseDown={(e) => e.preventDefault()}
+                              >
+                                {placeholder}
+                              </li>
+                              {options.map((it, i) => {
+                                const active = hover === i || value === it.slug;
+                                return (
+                                        <li
+                                                key={it.slug}
+                                                className={`px-3 py-2 rounded-lg cursor-pointer transition
+                             ${active
+                                                        ? 'bg-white/70 shadow-[0_0_12px_rgba(59,130,246,0.6)]'
+                                                        : 'hover:bg-white/60 hover:shadow-[0_0_10px_rgba(59,130,246,0.45)]'}`}
+                                                onMouseEnter={() => setHover(i)}
+                                                onMouseDown={(e) => e.preventDefault()}
+                                                onClick={() => pickOption(it.slug)}
+                                                role="option"
+                                                aria-selected={value === it.slug}
+                                        >
+                                          {it.label}
+                                        </li>
+                                );
+                              })}
+                            </ul>
+                          </div>
+
+                  )}
+                </div>
+        );
+      }
+
+      const chooseQuick = (slug) => {
+        setPick(slug);
+        setQ('');
+        onSearch(slug); // ✅ chỉ gọi 1 lần
+      };
+
+      // Đề xuất nhanh (slug phải trùng phần <slug> trong tên file)
+      const quick = React.useMemo(() => ([
+        {label: 'IT', slug: 'cong nghe thong tin vien thong'},
+        {label: 'Kế toán', slug: 'ke toan kiem toan'},
+        {label: 'Y tế', slug: 'y te cham soc suc khoe'},
+        {label: 'Giáo dục', slug: 'giao duc'},
+        {label: 'Kinh doanh', slug: 'kinh doanh'},
+      ]), []);
+
+      React.useEffect(() => {
+        api('/api/industries')
+                .then(j => setAll(j.items || []))
+                .catch(() => {
+                }); // im lặng nếu backend chưa sẵn
+      }, [api]);
+
+      // Hiệu ứng "open box" khi mount
+      React.useEffect(() => {
+        const onLoad = () => {
+          document.querySelectorAll('.open-box').forEach(el => {
+            const d = el.dataset.delay ? parseInt(el.dataset.delay, 10) : 80;
+            setTimeout(() => el.classList.add('is-in'), d);
+          });
+
+          const io = new IntersectionObserver((entries) => {
+            entries.forEach(e => {
+              if (e.isIntersecting) {
+                e.target.classList.add('is-in');
+                io.unobserve(e.target);
+              }
+            });
+          }, {threshold: .15});
+
+          document.querySelectorAll('.open-stagger').forEach(el => io.observe(el));
+        };
+        if (document.readyState === 'complete') onLoad();
+        else window.addEventListener('load', onLoad);
+        return () => window.removeEventListener('load', onLoad);
+      }, []);
+
+      // Định dạng bảng: căn giữa header, đánh dấu số, GIỚI HẠN KÍCH THƯỚC CỘT CHUẨN
+      React.useEffect(() => {
+  if (!data) return;
+
+  // tên sheet cần bỏ qua ép width
+  const EXCLUDE_SHEETS = new Set([
+    "Kỹ năng yêu cầu nhiều",
+    "Phúc lợi nhận được",
+  ]);
+
+  document.querySelectorAll(".overflow-auto").forEach((wrap) => {
+    // tìm tên sheet (h3 phía trên trong cùng card)
+    const card = wrap.closest(".shadow-sm, .glass, div"); // an toàn
+    const titleEl = card?.querySelector("h3");
+    const sheetName = (titleEl?.textContent || "").trim();
+
+    // bảng bên trong container
+    const tbl = wrap.querySelector("table");
+    if (!tbl) return;
+
+    // layout để không scroll ngang + cho phép wrap
+    tbl.style.tableLayout = "fixed";
+    tbl.style.width = "100%";
+    tbl.style.borderCollapse = "separate";
+    tbl.style.borderSpacing = "0";
+
+    // 1) Header căn giữa + wrap
+    tbl.querySelectorAll("thead th").forEach((th) => {
+      th.style.textAlign = "center";
+      th.style.whiteSpace = "normal";
+      th.style.overflowWrap = "anywhere";
+      th.style.wordBreak = "break-word";
+      th.style.lineHeight = "1.25";
+      // reset width inline cũ
+      ["width","minWidth","maxWidth"].forEach(p => th.style.removeProperty(p));
+    });
+
+    // 2) Đánh dấu số & format
+    tbl.querySelectorAll("tbody td").forEach((td) => {
+      const raw = (td.textContent || "").trim();
+      const norm = raw.replace(/,/g, "");
+      const num = parseFloat(norm);
+      const isNumber = raw !== "" && !isNaN(num) && /^[\d.\-+eE,]+$/.test(norm);
+      if (isNumber) {
+        td.classList.add("num");
+        td.style.textAlign = "center";
+        td.textContent = new Intl.NumberFormat("en-US").format(num);
+      } else {
+        td.classList.remove("num");
+        td.style.textAlign = "left";
+      }
+      td.style.whiteSpace = "normal";
+      td.style.overflowWrap = "anywhere";
+      td.style.wordBreak = "break-word";
+      ["width","minWidth","maxWidth"].forEach(p => td.style.removeProperty(p));
+    });
+
+    // 3) Gán nhãn cột & set kích thước
+    const ths = Array.from(tbl.querySelectorAll("thead th"));
+    ths.forEach((th, colIdx) => {
+      const tds = Array.from(tbl.querySelectorAll("tbody tr"))
+        .map(tr => tr.children[colIdx])
+        .filter(Boolean);
+
+      // gắn nhãn
+      let cls = "col-text";
+      if (colIdx === 0) {
+        cls = "col-first";
+      } else {
+        const numCount = tds.filter(td => td.classList.contains("num")).length;
+        const isNumericCol = tds.length > 0 && numCount / tds.length >= 0.7;
+        cls = isNumericCol ? "col-num" : "col-text";
+      }
+      th.classList.add(cls);
+      tds.forEach(td => td.classList.add(cls));
+    });
+
+    // 4) Ép min/max theo loại cột (trừ các sheet loại trừ)
+    const applyTight = !EXCLUDE_SHEETS.has(sheetName);
+
+    const setColBox = (selector, { min, max }) => {
+      tbl.querySelectorAll(selector).forEach((el) => {
+        el.style.minWidth = min;
+        el.style.maxWidth = max;
+        el.style.whiteSpace = "normal";
+        el.style.overflowWrap = "anywhere";
+        el.style.wordBreak = "break-word";
+      });
+    };
+
+    // luôn đặt tối thiểu để tránh vỡ bố cục
+    setColBox("th, td", { min: "80px", max: "250px" });
+
+    if (applyTight) {
+      // cột đầu (tên ngành) rộng tối đa 250px
+      setColBox(".col-first", { min: "120px", max: "250px" });
+      // cột số: thu gọn
+      setColBox(".col-num", { min: "90px", max: "140px" });
+      // cột văn bản khác: giữa giữa (để hạn chế scroll)
+      setColBox(".col-text", { min: "100px", max: "180px" });
+    }
+  });
+}, [data]);
+  const filtered = React.useMemo(() => {
+    const s = q.trim().toLowerCase();
+    if (!s) return all;
+    return all.filter(it =>
+      it.label.toLowerCase().includes(s) ||
+      it.slug.toLowerCase().includes(s)
+    );
+  }, [all, q]);
+
+  return (
+    <main>
+      {/* Tiêu đề */}
+      <section className="glass p-5 md:p-8 mt-4 open-box" data-delay="40">
+        <div className="glass-noise" aria-hidden="true"></div>
+        <h1 className="text-2xl md:text-3xl font-semibold text-slate-900">
+          Thống kê phân tích tuyển dụng theo ngành
+        </h1>
+        <p className="text-slate-700 mt-1">
+          Chọn ngành để hiển thị các bảng thống kê phân tích.
+        </p>
+      </section>
+
+      {/* Bộ chọn + tìm kiếm */}
+      <section className="glass p-5 md:p-8 mt-4 relative z-[5000]" data-delay="120">
+        <div className="glass-noise" aria-hidden="true"></div>
+
+        {/* Hàng 1: tìm kiếm + nút */}
+        <div className="flex flex-col md:flex-row gap-3 items-stretch md:items-center">
+          <div className="relative md:flex-1">
+            <input
+              className="w-full px-4 py-2 rounded-xl border bg-white/70 outline-none focus:border-slate-400"
+              placeholder="Tìm ngành..."
+              value={q}
+              onChange={e => {
+                const v = e.target.value;
+                setQ(v);
+                setShowSug(true);
+                fetchSugs(v); // chỉ fetch gợi ý, không gọi search tại đây
+              }}
+              onFocus={() => { setShowSug(true); if (q.trim()) fetchSugs(q); }}
+              onBlur={() => setTimeout(() => setShowSug(false), 120)}
+              onKeyDown={e => {
+                if (!sugs.length) return;
+                if (e.key === 'ArrowDown') {
+                  e.preventDefault();
+                  setActiveIdx(i => (i + 1) % sugs.length);
+                } else if (e.key === 'ArrowUp') {
+                  e.preventDefault();
+                  setActiveIdx(i => (i <= 0 ? sugs.length - 1 : i - 1));
+                } else if (e.key === 'Enter') {
+                  e.preventDefault();
+                  const item = activeIdx >= 0 ? sugs[activeIdx] : sugs[0];
+                  if (item) {
+                    pickSlug(item.slug, item.label); // pick + search 1 lần
+                  }
+                } else if (e.key === 'Escape') {
+                  setShowSug(false);
+                }
+              }}
+            />
+
+            {/* Dropdown gợi ý từ server */}
+            {showSug && q.trim() && sugs.length > 0 && (
+              <ul className="absolute left-0 right-0 mt-1 z-[6000] bg-white/95 border rounded-xl shadow-lg max-h-60 overflow-auto">
+                {sugs.map((it, i) => (
+                  <li
+                    key={it.slug}
+                    className={`px-3 py-2 cursor-pointer hover:bg-slate-100 ${i === activeIdx ? 'bg-slate-100' : ''}`}
+                    onMouseDown={e => e.preventDefault()}
+                    onClick={() => pickSlug(it.slug, it.label)} // chỉ 1 lần
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="text-slate-900">{it.label}</span>
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+
+          <button
+            type="button"
+            className="px-4 py-2 rounded-xl bg-black text-white hover:opacity-90 active:opacity-80"
+            onClick={() => onSearch(pick)}  // dùng slug hiện tại, 1 lần
+          >
+            Tìm kiếm
+          </button>
+        </div>
+
+        {/* Hàng 2: select + đề xuất */}
+        <div className="mt-4 md:flex md:items-center md:gap-3">
+          <div className="md:flex-1">
+          <GlassSelect
+            value={pick}
+            onChange={(slug) => {
+              setPick(slug);
+              if (slug) onSearch(slug); // vẫn chỉ gọi 1 lần
+            }}
+            options={(all || [])}
+            placeholder="Lựa chọn ngành"
+          />
+        </div>
+
+
+          <div className="mt-3 md:mt-0 md:flex-none flex flex-wrap gap-2">
+            {quick.map(x => (
+              <button
+                key={x.slug}
+                type="button"
+                className="chip"
+                onClick={() => chooseQuick(x.slug)} // ✅ không gọi thêm onSearch lần nữa
+              >
+                {x.label}
+              </button>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      {/* Kết quả */}
+      {(loading || error || data) && (
+        <section className="glass p-5 md:p-8 mt-4 open-stagger is-in">
+          <div className="glass-noise" aria-hidden="true"></div>
+          {loading && <div>Đang tải...</div>}
+          {error && <div className="text-red-200 bg-red-500/20 px-3 py-2 rounded-lg">{error}</div>}
+
+          {data && (
+            <div>
+              <div className="flex items-center justify-between">
+                <div>
+                  <div className="text-sm text-slate-700">Báo cáo phân tích tin tuyển dụng</div>
+                  <div className="font-medium break-all text-slate-900">{data.meta?.title}</div>
+                </div>
+                <div className="text-sm text-slate-700">
+                  Tổng sheets: <span className="font-medium">{data.meta?.sheets}</span>
+                </div>
+              </div>
+
+              <div className="mt-4 space-y-8">
+              {data.sheets?.map((sh, idx) => {
+                // Nếu là sheet phan_tich_luong thì loại bỏ 2 cột
+                let html = sh.html;
+                if (sh.name === "Lương (VND/tháng)" && html) {
+                html = html
+                  .replace(/<th[^>]*>\s*Lương bất thường\s*<\/th>/gi, "")
+                  .replace(/<th[^>]*>\s*Chi tiết\s*<\/th>/gi, "")
+                  .replace(/<td[^>]*class="[^"]*so_tin_luong_bat_thuong[^"]*"[^>]*>.*?<\/td>/gi, "")
+                  .replace(/<td[^>]*class="[^"]*chi_tiet_bat_thuong[^"]*"[^>]*>.*?<\/td>/gi, "");
+              }
+            return (
+            <div key={idx} className="bg-white/70 rounded-xl p-3 shadow-sm">
+              <div className="flex items-center justify-between mb-2">
+                <h3 className="text-lg font-semibold text-slate-900">{sh.name}</h3>
+                <div className="text-sm text-slate-700">
+                  {sh.preview_rows} / {sh.rows} dòng (xem nhanh)
+                </div>
+              </div>
+
+              {sh.name === "Số lượng tin" ? (
+                <div className="grid grid-cols-1 md:grid-cols-12 gap-4">
+                  <div className="md:col-span-8 overflow-auto w-full" dangerouslySetInnerHTML={{ __html: html }} />
+                  <div className="md:col-span-4 flex items-center justify-center overflow-hidden">
+                    <PieFromSheet data={sh.json} />
+                  </div>
+                </div>
+
+              ) : sh.name === "Yêu cầu kinh nghiệm (năm)" ? (
+                <div className="grid grid-cols-1 md:grid-cols-12 gap-4">
+                  <div className="md:col-span-8 overflow-auto w-full" dangerouslySetInnerHTML={{ __html: html }} />
+                  <div className="md:col-span-4 flex items-center justify-center overflow-hidden">
+                    <ExpStacked100FromSheet data={sh.json} />
+                  </div>
+                </div>
+
+              ) : sh.name === "Yêu cầu trình độ học vấn" ? (
+                <div className="w-full">
+                  <EduGroupedBarFromSheet data={sh.json} height={420} />
+                </div>
+
+              ) : sh.name === "Yêu cầu ngôn ngữ" ? (
+                <div className="w-full">
+                  <LangGroupedBarFromSheet data={sh.json} height={420} />
+                </div>
+              ) : sh.name === "Lương (VND/tháng)" ? (
+                <div className="w-full">
+                  <TopLinesLuongBatThuong data={sh.json} />
+                  <div className="overflow-auto w-full" dangerouslySetInnerHTML={{ __html: html }} />
+                </div>
+              ) : sh.name === "Yêu cầu loại hình làm việc" ? (
+                <div className="w-full">
+                  <WorktypeGroupedBarFromSheet data={sh.json} height={420} />
+                </div>
+
+              ) : sh.name === "Yêu cầu độ tuổi" ? (
+                <div className="grid grid-cols-1 md:grid-cols-12 gap-4">
+                  <div className="md:col-span-12">
+                    <TopLinesAge data={sh.json} />
+                  </div>
+                  <div className="md:col-span-8 overflow-auto w-full" dangerouslySetInnerHTML={{ __html: html }} />
+                  <div className="md:col-span-4 flex items-center justify-center overflow-hidden">
+                    <AgeStacked100FromSheet data={sh.json} />
+                  </div>
+                </div>
+
+              ) : sh.name === "Ngày làm việc" ? (
+                <div className="w-full">
+                  <TopLinesNgayLamViec data={sh.json} />
+                  <div className="overflow-auto w-full" dangerouslySetInnerHTML={{ __html: html }} />
+                </div>
+
+              ) :
+                sh.name === "Giờ làm việc"
+               ? (
+                <div className="grid grid-cols-1 md:grid-cols-12 gap-4">
+                  <div className="md:col-span-8 overflow-auto w-full" dangerouslySetInnerHTML={{ __html: html }} />
+                  <div className="md:col-span-4 flex items-center justify-center overflow-hidden">
+                    <ScatterWorkHoursFromSheet data={sh.json} height={420} />
+                  </div>
+                </div>
+
+              ) : (
+                <div className="overflow-auto w-full" dangerouslySetInnerHTML={{ __html: html }} />
+              )}
+            </div>
+          );
+      })}
+              </div>
+            </div>
+          )}
+        </section>
+      )}
+    </main>
+  );
+}
+    function toNumber(v){
+    if (v == null) return NaN;
+    if (typeof v === "number") return v;
+    let s = String(v).trim().replace(/%/g, "").replace(/\s+/g, "");
+    if (/^\d+,\d+$/.test(s)) s = s.replace(",", ".");
+    else s = s.replace(/,/g, "");
+    return parseFloat(s);
+  }
+function PieFromSheet({ data, forceDivide100 = false }) {
+  if (!window.Recharts) return <div className="text-slate-600 text-sm">Recharts chưa nạp</div>;
+  const { PieChart, Pie, Cell, Tooltip, ResponsiveContainer } = window.Recharts;
+
+  // Parser số an toàn cho cả "35,69" và "35.69"
+  const toNumber = (x) => {
+    if (x == null) return NaN;
+    let s = String(x).trim().replace(/[^0-9.,-]/g, "");
+    const hasDot = s.includes(".");
+    const hasComma = s.includes(",");
+
+    if (hasDot && hasComma) {
+      // Dấu tách thập phân là ký tự xuất hiện SAU CÙNG
+      const lastComma = s.lastIndexOf(",");
+      const lastDot   = s.lastIndexOf(".");
+      const dec = lastComma > lastDot ? "," : ".";
+      const thou = dec === "," ? "." : ",";
+      s = s.split(thou).join("").replace(dec, ".");
+    } else if (hasComma) {
+      // Chỉ có dấu phẩy: nếu cuối có 1–2 số thì phẩy là thập phân
+      s = /,\d{1,2}$/.test(s) ? s.replace(/\./g, "").replace(",", ".") : s.replace(/,/g, "");
+    } else if (hasDot) {
+      // Chỉ có dấu chấm: nếu cuối có 1–2 số thì chấm là thập phân, ngược lại là ngàn
+      s = /\.\d{1,2}$/.test(s) ? s.replace(/,/g, "") : s.replace(/\./g, "");
+    }
+    const v = parseFloat(s);
+    return Number.isFinite(v) ? v : NaN;
+  };
+
+  const items0 = (Array.isArray(data) ? data : [])
+    .map((r) => {
+      const name = r["Tên ngành"] ?? r["nganh"] ?? "";
+      if (name && name.toString().toLowerCase().includes("tổng cộng")) return null;
+      const raw = r["Tỷ lệ"] ?? r["Tỷ lệ (%)"] ?? r["ty_le"] ?? null;
+      const num = toNumber(raw);
+      return (name && !isNaN(num)) ? { name: String(name), value: num } : null;
+    })
+    .filter(Boolean);
+
+  if (!items0.length) return <div className="text-slate-600 text-sm">Không có dữ liệu tỷ lệ</div>;
+
+  // Nếu dữ liệu dạng 0–1 thì nhân 100; hoặc ép chia 100 theo yêu cầu
+  const maxVal = Math.max(...items0.map(d => d.value));
+  const scaleToPercent = forceDivide100 || (maxVal <= 1.5 && maxVal > 0);
+  const items = scaleToPercent
+    ? items0.map(d => ({ ...d, value: d.value * 100 }))
+    : items0;
+
+  const COLORS = [
+    "#3366CC","#DC3912","#FF9900","#109618","#990099",
+    "#0099C6","#DD4477","#66AA00","#B82E2E","#316395",
+    "#994499","#22AA99","#AAAA11","#6633CC","#E67300"
+  ];
+
+  const formatPercent = (v) =>
+    v.toLocaleString("vi-VN", { maximumFractionDigits: 2 }) + "%";
+
+  const CustomTooltip = ({ active, payload }) => {
+    if (!active || !payload?.length) return null;
+    const { name, value, fill } = payload[0] || {};
+    return (
+      <div className="bg-white/95 rounded-md shadow px-2 py-1 text-sm border"
+           style={{ borderColor: fill, borderLeftWidth: 4 }}>
+        <div className="font-medium">{name}</div>
+        <div className="text-slate-700">{formatPercent(Number(value))}</div>
+      </div>
+    );
+  };
+
+  return (
+  <div className="flex flex-col h-full">
+    {/* Khối biểu đồ */}
+    <div className="flex justify-center">
+      <ResponsiveContainer width={240} height={240}>
+        <PieChart>
+          <Pie
+            data={items}
+            dataKey="value"
+            nameKey="name"
+            cx="50%"
+            cy="50%"
+            outerRadius="100%"
+            label={false}
+            labelLine={false}
+          >
+            {items.map((_, i) => (
+              <Cell key={i} fill={COLORS[i % COLORS.length]} />
+            ))}
+          </Pie>
+          <Tooltip content={<CustomTooltip />} />
+        </PieChart>
+      </ResponsiveContainer>
+    </div>
+
+    {/* Khối legend */}
+    <div className="flex flex-wrap justify-center gap-3 mt-4 text-sm">
+      {items.map((it, i) => (
+        <div key={i} className="flex items-center gap-1">
+          <span
+            className="inline-block w-3 h-3 rounded-sm"
+            style={{ backgroundColor: COLORS[i % COLORS.length] }}
+          />
+          <span>{it.name}</span>
+        </div>
+      ))}
+    </div>
+  </div>
+);
+}
+function ExpStacked100FromSheet({ data, height = 380 }) {
+  if (!window.Recharts)
+    return <div className="text-slate-600 text-sm">Recharts chưa nạp</div>;
+  const {
+    ResponsiveContainer, BarChart, Bar, XAxis, YAxis,
+    CartesianGrid, Tooltip, Legend
+  } = window.Recharts;
+
+  const rows = (Array.isArray(data) ? data : [])
+    .map((r) => {
+      const name = r["Tên ngành"] ?? r["ten_nganh"] ?? r["Tên Ngành"] ?? r["nganh"] ?? "";
+      if (!name) return null;
+      if (/tong\s*(quan|cộng)/.test(String(name).toLowerCase())) return null; // bỏ dòng TỔNG QUAN
+
+      function pick(r, keys) {
+        for (const k of keys) {
+          if (r[k] != null && r[k] !== "") return toNumber(r[k]);
+        }
+        return 0;
+      }
+      const noExp = pick(r, ["so_tin_no_exp", "so_tin_noexp", "no_exp","Không yêu cầu (tin)"]);
+      const y1    = pick(r, ["Duoi_1", "duoi_1", "Dưới 1 năm"]);
+      const y13   = pick(r, ["1_3", "1-3", "Từ 1-3 năm"]);
+      const y46   = pick(r, ["4_6", "4-6", "Từ 4-6 năm"]);
+      const y7    = pick(r, ["Tren_7", ">=7", "Từ 7 năm"]);
+
+
+      const total = noExp + y1 + y13 + y46 + y7;
+      if (!total) return null;
+
+      const pct = (x) => Math.round((x / total) * 1000) / 10; // 1 chữ số thập phân
+      return {
+        name: String(name),
+        "Không yêu cầu": pct(noExp),
+        "Dưới 1 năm": pct(y1),
+        "Từ 1-3 năm": pct(y13),
+        "Từ 4-6 năm": pct(y46),
+        "Từ 7 năm": pct(y7),
+        _total: total,
+      };
+    })
+    .filter(Boolean);
+
+  if (!rows.length)
+    return <div className="text-slate-600 text-sm">Không có dữ liệu kinh nghiệm</div>;
+
+  return (
+    <div className="w-full h-full" style={{ height }}>
+      <ResponsiveContainer width="100%" height="100%">
+        <BarChart data={rows} margin={{ top: 10, right: 16, bottom: 48, left: 8 }}>
+          <CartesianGrid strokeDasharray="3 3" />
+          <XAxis dataKey="name" tick={false} axisLine={false} ticks={rows.map(r => r.name)}  />
+          <YAxis domain={[0, 100]} tickFormatter={(v) => `${v}%`} allowDecimals={false} />
+          <Tooltip
+            formatter={(v, key) => [
+              `${Number(v).toFixed(1)}%`,
+              key
+            ]}
+            labelFormatter={(label, items) => {
+              const p = items?.[0]?.payload ?? {};
+              return (
+                <div>
+                  <div style={{ fontWeight: 600 }}>{label}</div>
+                  <div>Tổng số tin: {p._total ?? 0}</div>
+                </div>
+              );
+            }}
+          />
+          <Legend verticalAlign="bottom" height={36} />
+          <Bar dataKey="Không yêu cầu" stackId="exp" fill="#15803d" />
+          <Bar dataKey="Dưới 1 năm" stackId="exp" fill="#1d4ed8" />
+          <Bar dataKey="Từ 1-3 năm" stackId="exp" fill="#d97706" />
+          <Bar dataKey="Từ 4-6 năm" stackId="exp" fill="#b91c1c" />
+          <Bar dataKey="Từ 7 năm" stackId="exp" fill="#4b5563" />
+        </BarChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+function LangGroupedBarFromSheet({ data, height = 420 }) {
+  if (!window.Recharts) return <div className="text-slate-600 text-sm">Recharts chưa nạp</div>;
+  const {
+    ResponsiveContainer, BarChart, Bar, XAxis, YAxis,
+    CartesianGrid, Tooltip, Legend, LabelList
+  } = window.Recharts;
+
+  const toNum = (v) => {
+    if (v === null || v === undefined) return 0;
+    const s = String(v).trim().replace(/\./g, '').replace(/,/g, '.'); // 1.234 -> 1234 ; 76,07 -> 76.07
+    const n = parseFloat(s);
+    return Number.isFinite(n) ? n : 0;
+  };
+
+  const clean = (s) =>
+    String(s ?? "")
+      .normalize("NFD")
+      .replace(/\p{M}/gu, "")    // bỏ dấu
+      .replace(/\s+/g, " ")
+      .replace(/[^\S\r\n]/g, " ") // NBSP -> space
+      .trim()
+      .toLowerCase();
+
+  const rows = (Array.isArray(data) ? data : [])
+    .map((r) => {
+      const name =
+        r["Ngôn ngữ"] ?? r["ngôn_ngữ"] ?? r["ngon_ngu"] ?? r["Ngon ngu"] ?? r["Tên ngôn ngữ"] ?? "";
+      if (!name) return null;
+
+      // Bỏ dòng TỔNG QUAN (mọi biến thể, có/không dấu)
+      const nm = clean(name);
+      if (nm === "tong quan" || /tong\s*quan/.test(nm)) return null;
+
+      const so_tin = toNum(r["Số tin"] ?? r["so_tin"]);
+      const so_tin_top_nganh = toNum(
+        r["Số lượng"] ?? r["Số lượng ngành top"] ?? r["so_tin_top_nganh"]
+      );
+      const top_nganh = r["Ngành yêu cầu nhiều nhất"] ?? r["top_nganh"] ?? "";
+
+      return { ngon_ngu: String(name), so_tin, so_tin_top_nganh, top_nganh: String(top_nganh || "") };
+    })
+    .filter(Boolean);
+
+  // Sắp xếp giảm dần theo tổng số tin
+  rows.sort((a, b) => b.so_tin - a.so_tin);
+
+  return (
+    <ResponsiveContainer width="100%" height={height}>
+      <BarChart data={rows} margin={{ top: 12, right: 16, left: 8, bottom: 28 }}>
+        <CartesianGrid strokeDasharray="3 3" />
+        <XAxis dataKey="ngon_ngu" angle={-15} textAnchor="end" height={45} interval={0} />
+        <YAxis />
+        <Tooltip
+          formatter={(value, name, props) => {
+            if (name === "Số tin ngành top") {
+              const sector = props?.payload?.top_nganh || "";
+              return [`${value}${sector ? ` (${sector})` : ""}`, name];
+            }
+            return [value, name];
+          }}
+        />
+        <Legend />
+        <Bar dataKey="so_tin" name="Số tin tổng" fill="#4f46e5" />
+        <Bar dataKey="so_tin_top_nganh" name="Số tin ngành top" fill="#10b981">
+          <LabelList dataKey="top_nganh" position="top" style={{ fontSize: 10 }} />
+        </Bar>
+      </BarChart>
+    </ResponsiveContainer>
+  );
+}
+function EduGroupedBarFromSheet({ data, height = 420 }) {
+  if (!window.Recharts) return <div className="text-slate-600 text-sm">Recharts chưa nạp</div>;
+  const {
+    ResponsiveContainer, BarChart, Bar, XAxis, YAxis,
+    CartesianGrid, Tooltip, Legend, LabelList
+  } = window.Recharts;
+
+  const toNum = (v) => {
+    if (v === null || v === undefined) return 0;
+    const s = String(v).trim().replace(/\./g, '').replace(/,/g, '.');
+    const n = parseFloat(s);
+    return Number.isFinite(n) ? n : 0;
+  };
+
+  const clean = (s) =>
+    String(s ?? "")
+      .normalize("NFD")
+      .replace(/\p{M}/gu, "")
+      .replace(/\s+/g, " ")
+      .replace(/[^\S\r\n]/g, " ")
+      .trim()
+      .toLowerCase();
+
+  const rows = (Array.isArray(data) ? data : [])
+    .map((r) => {
+      const name =
+        r["Trình độ"] ?? r["trinh_do"] ?? r["hoc_van"] ?? r["Ten"] ?? "";
+      if (!name) return null;
+
+      // Bỏ dòng TỔNG QUAN
+      const nm = clean(name);
+      if (nm === "tong quan" || /tong\s*quan/.test(nm)) return null;
+
+      const so_tin = toNum(r["Số tin"] ?? r["so_tin"]);
+      const so_tin_top_nganh = toNum(
+        r["Số lượng"] ?? r["so_tin_top_nganh"] ?? r["Số lượng ngành top"]
+      );
+      const top_nganh = r["Ngành yêu cầu nhiều nhất"] ?? r["top_nganh"] ?? "";
+
+      return {
+        trinh_do: String(name),
+        so_tin,
+        so_tin_top_nganh,
+        top_nganh: String(top_nganh || "")
+      };
+    })
+    .filter(Boolean);
+
+  rows.sort((a, b) => b.so_tin - a.so_tin);
+
+  return (
+    <ResponsiveContainer width="100%" height={height}>
+      <BarChart data={rows} margin={{ top: 12, right: 16, left: 8, bottom: 28 }}>
+        <CartesianGrid strokeDasharray="3 3" />
+        <XAxis dataKey="trinh_do" angle={-15} textAnchor="end" height={45} interval={0} />
+        <YAxis />
+        <Tooltip
+          formatter={(value, name, props) => {
+            if (name === "Số tin ngành top") {
+              const sector = props?.payload?.top_nganh || "";
+              return [`${value}${sector ? ` (${sector})` : ""}`, name];
+            }
+            return [value, name];
+          }}
+        />
+        <Legend />
+        <Bar dataKey="so_tin" name="Số tin tổng" fill="#4f46e5" />
+        <Bar dataKey="so_tin_top_nganh" name="Số tin ngành top" fill="#f59e0b">
+          <LabelList dataKey="top_nganh" position="top" style={{ fontSize: 10 }} />
+        </Bar>
+      </BarChart>
+    </ResponsiveContainer>
+  );
+}
+function WorktypeGroupedBarFromSheet({ data, height = 420 }) {
+  if (!window.Recharts) return <div className="text-slate-600 text-sm">Recharts chưa nạp</div>;
+  const {
+    ResponsiveContainer, BarChart, Bar, XAxis, YAxis,
+    CartesianGrid, Tooltip, Legend, LabelList
+  } = window.Recharts;
+
+  const toNum = (v) => {
+    if (v === null || v === undefined) return 0;
+    const s = String(v).trim()
+      .replace(/\.(?=\d{3}\b)/g, "") // 1.003 -> 1003
+      .replace(/,/g, ".");           // 97,61 -> 97.61
+    const n = parseFloat(s);
+    return Number.isFinite(n) ? n : 0;
+  };
+
+  const normalize = (s) =>
+    String(s ?? "")
+      .normalize("NFD").replace(/\p{M}/gu, "")   // bỏ dấu
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, " ")               // ký tự lạ -> space
+      .trim();
+
+  // Ghép key về dạng token ko khoảng trắng/underscore/dash
+  const token = (s) => normalize(s).replace(/\s+/g, "");
+
+  // Tìm key theo nhiều biến thể (fuzzy)
+  const findKey = (row, candidates) => {
+    const all = Object.keys(row);
+    const idx = new Map(all.map((k) => [token(k), k])); // token -> original key
+
+    for (const cand of candidates) {
+      const t = token(cand);
+      if (idx.has(t)) return idx.get(t);
+      // Cho phép khớp "chứa" (ví dụ cand=loaihinh, key=loaihinhlamviec)
+      for (const tk of idx.keys()) {
+        if (tk.includes(t)) return idx.get(tk);
+      }
+    }
+    return null;
+  };
+
+  const arr = Array.isArray(data) ? data : [];
+
+  // Chuẩn hóa keys một lần (dựa trên dòng đầu làm mẫu)
+  let kName = null, kTotal = null, kTopCnt = null, kTopName = null;
+  if (arr.length) {
+    const probe = arr[0];
+
+    kName = findKey(probe, [
+      "Loại hình làm việc", "Loại hình", "Hình thức",
+      "loai_hinh_lam_viec", "loai_hinh", "hinh_thuc", "type"
+    ]);
+
+    kTotal = findKey(probe, [
+      "Số tin", "so_tin", "count", "tong_so_tin"
+    ]);
+
+    kTopCnt = findKey(probe, [
+      "so_tin_top_nganh", "Số lượng ngành top", "Số lượng",
+      "so_luong_top"
+    ]);
+
+    kTopName = findKey(probe, [
+      "Ngành yêu cầu nhiều nhất", "top_nganh", "nganh_top"
+    ]);
+  }
+
+  if (!kName || !kTotal) {
+    console.warn("[WorktypeGroupedBar] Không tìm được key:", { kName, kTotal, kTopCnt, kTopName, sample: arr[0] });
+  }
+
+  const rows = arr.map((r) => {
+      const name = kName ? r[kName] : undefined;
+      if (!name) return null;
+
+      // bỏ TỔNG QUAN (mọi biến thể)
+      const nm = normalize(name);
+      if (nm === "tong quan" || /(^| )tong( |-)quan($| )/.test(nm)) return null;
+
+      const so_tin = toNum(kTotal ? r[kTotal] : 0);
+      const so_tin_top_nganh = toNum(kTopCnt ? r[kTopCnt] : 0);
+      const top_nganh = kTopName ? (r[kTopName] ?? "") : "";
+
+      return {
+        loai_hinh: String(name),
+        so_tin,
+        so_tin_top_nganh,
+        top_nganh: String(top_nganh || "")
+      };
+    })
+    .filter(Boolean);
+
+  if (rows.length === 0) {
+    return (
+      <div className="text-sm text-slate-600 p-3">
+        Không tìm thấy dữ liệu hợp lệ cho &quot;Loại hình làm việc&quot;.
+        Vui lòng mở Console để xem cảnh báo về tên cột (kName/kTotal/kTopCnt/kTopName).
+      </div>
+    );
+  }
+
+  rows.sort((a, b) => b.so_tin - a.so_tin);
+
+  return (
+    <ResponsiveContainer width="100%" height={height}>
+      <BarChart data={rows} margin={{ top: 12, right: 16, left: 8, bottom: 28 }}>
+        <CartesianGrid strokeDasharray="3 3" />
+        <XAxis dataKey="loai_hinh" angle={-15} textAnchor="end" height={45} interval={0} />
+        <YAxis />
+        <Tooltip
+          formatter={(value, name, props) => {
+            if (name === "Số tin ngành top") {
+              const sector = props?.payload?.top_nganh || "";
+              return [`${value}${sector ? ` (${sector})` : ""}`, name];
+            }
+            return [value, name];
+          }}
+        />
+        <Legend />
+        <Bar dataKey="so_tin" name="Số tin tổng" fill="#4f46e5" />
+        <Bar dataKey="so_tin_top_nganh" name="Số tin ngành top" fill="#ef4444">
+          <LabelList dataKey="top_nganh" position="top" style={{ fontSize: 10 }} />
+        </Bar>
+      </BarChart>
+    </ResponsiveContainer>
+  );
+}
+function TopLinesNgayLamViec({ data }) {
+  // ===== Helpers =====
+  const normKey = (k) =>
+    String(k ?? "")
+      .normalize("NFKC")
+      .replace(/[\u00A0\u200B\u200C\u200D\uFEFF]/g, "")
+      .replace(/[–—−]/g, "-")
+      .trim();
+
+  const normalizeRowKeys = (row) => {
+    const out = {};
+    for (const [k, v] of Object.entries(row)) out[normKey(k)] = v;
+    return out;
+  };
+
+  const noAccentLower = (s) =>
+    String(s ?? "").normalize("NFD").replace(/\p{M}/gu, "").toLowerCase().trim();
+
+  const addTinLabel = (name) =>
+    String(name || "").trim().replace(/\((\d+)\)\s*$/, "");
+
+  const parseCount = (name) => {
+    const m = String(name || "").match(/\((\d+)\)\s*$/);
+    return m ? Number(m[1]) : 0;
+  };
+
+  const getCell = (row, keys) => {
+    for (const k of keys) {
+      const v = row?.[k];
+      if (v != null && String(v).trim() !== "") return String(v);
+    }
+    return "";
+  };
+
+  const prettifyOtherLabel = (raw) => {
+    const t = String(raw || "").trim().toLowerCase();
+    const rep = t
+      .replace(/\s+/g, " ")
+      .replace(/t(\d)/g, "Thứ $1")
+      .replace(/thu\s*(\d)/g, "Thứ $1")
+      .replace(/–|—/g, "-")
+      .replace(/\s*-\s*/g, " - ");
+    return rep ? rep.charAt(0).toUpperCase() + rep.slice(1) : "";
+  };
+
+  // ===== Chuẩn hoá dữ liệu =====
+  const rows = (Array.isArray(data) ? data : []).map(normalizeRowKeys);
+  const colNameKeys = ["Tên ngành", "ten_nganh", "Tên Ngành", "nganh"];
+
+  const topRow =
+    rows.find((r) => {
+      const name = getCell(r, colNameKeys);
+      const s = noAccentLower(name);
+      return s === "top nganh" || s.startsWith("top");
+    }) || {};
+
+  const totalRow =
+    rows.find((r) => {
+      const name = getCell(r, colNameKeys);
+      return noAccentLower(name).includes("tong");
+    }) || {};
+
+  // Lấy ô từ dòng TOP NGÀNH
+  const cellT26 = getCell(topRow, ["T2-T6", "T2–T6", "Thứ 2 - thứ 6"]);
+  const cellT27 = getCell(topRow, ["T2-T7", "T2–T7", "Thứ 2 - thứ 7"]);
+  const cellKhac = getCell(topRow, ["Khac", "Khác", "Các ngày khác"]);
+  const cellNinfo = getCell(topRow, ["no_info", "Không có thông tin"]);
+
+  const cntT26 = parseCount(cellT26);
+  const cntT27 = parseCount(cellT27);
+  const cntKhac = parseCount(cellKhac);
+  const cntNinfo = parseCount(cellNinfo);
+
+  const totalT26 = Number(getCell(totalRow, ["T2-T6", "T2–T6", "Thứ 2 - thứ 6"])) || 0;
+  const totalT27 = Number(getCell(totalRow, ["T2-T7", "T2–T7", "Thứ 2 - thứ 7"])) || 0;
+  const totalNinfo = Number(getCell(totalRow, ["no_info", "Không có thông tin"])) || 0;
+  const totalKhac = Number(getCell(totalRow, ["Khac", "Khác", "Các ngày khác"])) || 0;
+
+  // ===== Gom "Chi_tiet_khac": label -> nhiều URL =====
+  const detailKeyCandidates = ["Chi_tiet_khac", "Chi tiet khac", "Chi tiết", "Chi tiet"];
+  const grouped = new Map();
+
+  const RE_PAIR = /([^|]+?)\s*\|\s*([\s\S]+)/g;
+  // bắt <label> | <url1; url2; ...>
+
+  for (const r of rows) {
+    const raw = getCell(r, detailKeyCandidates);
+    if (!raw) continue;
+
+    let m;
+    while ((m = RE_PAIR.exec(raw)) !== null) {
+      const label = prettifyOtherLabel(m[1]);
+      if (!label) continue;
+
+      // Đếm số dấu ; để xác định số link
+      const parts = m[2].split(";").map((u) => u.trim()).filter(Boolean);
+
+      if (!grouped.has(label)) grouped.set(label, []);
+      const arr = grouped.get(label);
+
+      parts.forEach((u) => {
+        if (u && !arr.includes(u)) arr.push(u);
+      });
+    }
+  }
+
+  // ===== Render =====
+  return (
+    <div className="text-sm text-slate-800 mb-3 space-y-1">
+      {cntT26 > 0 && (
+        <div>
+          <b>Thứ 2 - thứ 6</b> ngành yêu cầu nhiều nhất là <b>{addTinLabel(cellT26)}</b> ({cntT26}/{totalT26} tin).
+        </div>
+      )}
+      {cntT27 > 0 && (
+        <div>
+          <b>Thứ 2 - thứ 7</b> ngành yêu cầu nhiều nhất là <b>{addTinLabel(cellT27)}</b> ({cntT27}/{totalT27} tin).
+        </div>
+      )}
+      {cntNinfo > 0 && (
+        <div>
+          <b>Không có thông tin</b> ngành nhiều nhất là <b>{addTinLabel(cellNinfo)}</b> ({cntNinfo}/{totalNinfo} tin).
+        </div>
+      )}
+
+      {grouped.size > 0 && (
+        <>
+          <div><b>Các chi tiết khác:</b></div>
+          <ul className="list-disc pl-5 space-y-1">
+            {[...grouped.entries()].map(([label, urls], idx) => (
+              <li key={idx}>
+                {label}{" "}
+                {urls.map((u, i) => (
+                  <React.Fragment key={u}>
+                    {" | "}
+                    <a
+                      href={u}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="text-blue-600 underline"
+                    >
+                      {`Click xem chi tiết tin ${i + 1}`}
+                    </a>
+                  </React.Fragment>
+                ))}
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+    </div>
+  );
+}
+function AgeStacked100FromSheet({ data, height = 380 }) {
+  if (!window.Recharts)
+    return <div className="text-slate-600 text-sm">Recharts chưa nạp</div>;
+  const {
+    ResponsiveContainer, BarChart, Bar, XAxis, YAxis,
+    CartesianGrid, Tooltip, Legend
+  } = window.Recharts;
+
+  // --- Utils ---
+  const toNum = (v) => {
+    if (v === null || v === undefined) return 0;
+    const s = String(v).trim()
+      .replace(/\.(?=\d{3}\b)/g, "") // 1.003 -> 1003
+      .replace(/,/g, ".");           // 36,71 -> 36.71
+    const n = parseFloat(s);
+    return Number.isFinite(n) ? n : 0;
+  };
+
+  const clean = (s) =>
+    String(s ?? "")
+      .normalize("NFD").replace(/\p{M}/gu, "") // bỏ dấu
+      .toLowerCase().replace(/\s+/g, " ").trim();
+
+  // Chuẩn hoá KEY: bỏ NBSP/zero-width/BOM, thống nhất dash, trim
+  const normKey = (k) => String(k ?? "")
+    .normalize("NFKC")
+    .replace(/[\u00A0\u200B\u200C\u200D\uFEFF]/g, "") // NBSP, ZW*, BOM
+    .replace(/[–—−]/g, "–")                           // mọi dash -> en-dash
+    .trim();
+
+  const normalizeRowKeys = (row) => {
+    const out = {};
+    for (const [k, v] of Object.entries(row)) out[normKey(k)] = v;
+    return out;
+  };
+
+  // --- Build rows ---
+  const rows = (Array.isArray(data) ? data : [])
+    .map((r0) => {
+      const r = normalizeRowKeys(r0);
+
+      const name =
+        r["Tên ngành"] ?? r["ten_nganh"] ?? r["Tên Ngành"] ?? r["nganh"] ?? "";
+      if (!name) return null;
+
+      // Bỏ dòng tổng
+      const nm = clean(name);
+      if (/^tong($| )/.test(nm) || /^top nganh$/.test(nm)) return null;
+
+      // Đọc đúng các cột đã biết (chú ý en-dash “–”)
+      const a1524   = toNum(r["15–24"]?? r ["Từ 15-24 tuổi"] );
+      const a2534   = toNum(r["25–34"]?? r ["Từ 25-34 tuổi"] );
+      const a3554   = toNum(r["35–54"] ?? r ["Từ 35-54 tuổi"]);
+      const a55p    = toNum(r["55+"]?? r ["Trên 55 tuổi"]);
+      const aNoInfo = toNum(r["no_info"] ?? r ["Không có thông tin"]);
+
+      const valid = a1524 + a2534 + a3554 + a55p; // có tuổi
+      const total = valid + aNoInfo;              // mẫu số 100%
+      if (!total) return null;
+
+      const pct = (x) => Math.round((x / total) * 1000) / 10; // 1 số thập phân
+
+      const tong = toNum(
+        r["tong_so_tin"] ?? r["Tổng số tin"] ?? r["Số tin"] ?? r["so_tin"] ?? total
+      );
+
+      return {
+        name: String(name),
+        "Từ 15-24 tuổi": pct(a1524),
+        "Từ 25-34 tuổi": pct(a2534),
+        "Từ 35-54 tuổi": pct(a3554),
+        "Trên 55 tuổi":   pct(a55p),
+        "Không có thông tin": pct(aNoInfo),
+        _valid: valid,
+        _total: tong,
+      };
+    })
+    .filter(Boolean);
+
+  if (!rows.length)
+    return <div className="text-slate-600 text-sm">Không có dữ liệu độ tuổi</div>;
+
+  // --- Chart ---
+  return (
+    <div className="w-full h-full" style={{ height }}>
+      <ResponsiveContainer width="100%" height="100%">
+        <BarChart data={rows} margin={{ top: 10, right: 16, bottom: 48, left: 8 }}>
+          <CartesianGrid strokeDasharray="3 3" />
+          <XAxis dataKey="name" tick={false} axisLine={false} />
+          <YAxis domain={[0, 100]} tickFormatter={(v) => `${v}%`} allowDecimals={false} />
+          <Tooltip
+            formatter={(v, key) => [`${Number(v).toFixed(1)}%`, key]}
+            labelFormatter={(label, items) => {
+              const p = items?.[0]?.payload ?? {};
+              return (
+                <div>
+                  <div style={{ fontWeight: 600 }}>{label}</div>
+                  <div>Tổng tin: {p._total ?? 0}</div>
+                  <div>Có thông tin tuổi: {p._valid ?? 0} tin</div>
+                </div>
+              );
+            }}
+            wrapperStyle={{ top: 20 }} // tránh bị khuất dòng đầu
+          />
+          <Legend verticalAlign="bottom" height={40} />
+          <Bar dataKey="Từ 15-24 tuổi" stackId="age" fill="#ffd700" />
+          <Bar dataKey="Từ 25-34 tuổi" stackId="age" fill="#1d4ed8" />
+          <Bar dataKey="Từ 35-54 tuổi" stackId="age" fill="#f97316" />
+          <Bar dataKey="Trên 55 tuổi"   stackId="age" fill="#b91c1c" />
+          <Bar dataKey="Không có thông tin" stackId="age" fill="#22c55e" />
+        </BarChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+function TopLinesAge({ data }) {
+  // Chuẩn hoá key để tránh NBSP / dash lạ
+  const normKey = (k) => String(k ?? "")
+    .normalize("NFKC")
+    .replace(/[\u00A0\u200B\u200C\u200D\uFEFF]/g, "")
+    .replace(/[–—−]/g, "–")
+    .trim();
+
+  const normalizeRowKeys = (row) => {
+    const out = {};
+    for (const [k, v] of Object.entries(row)) out[normKey(k)] = v;
+    return out;
+  };
+
+  const noAccentLower = (s) =>
+    String(s ?? "").normalize("NFD").replace(/\p{M}/gu, "").toLowerCase().trim();
+
+  const addTinLabel = (name) =>
+    String(name || "").trim().replace(/\((\d+)\)\s*$/, "($1 tin)");
+
+  const parseCount = (name) => {
+    const m = String(name || "").match(/\((\d+)\)\s*$/);
+    return m ? Number(m[1]) : 0;
+  };
+
+  const getCell = (row, keys) => {
+    for (const k of keys) {
+      const v = row[k];
+      if (v != null && String(v).trim() !== "") return String(v);
+    }
+    return "";
+  };
+
+  const rows = (Array.isArray(data) ? data : []).map(normalizeRowKeys);
+
+  // tìm dòng TOP NGÀNH
+  const topRow = rows.find((r) => {
+    const name = r["Tên ngành"] || r["ten_nganh"] || r["Tên Ngành"] || r["nganh"] || "";
+    const s = noAccentLower(name);
+    return s === "top nganh" || s.startsWith("top");
+  }) || {};
+
+  // lấy ô theo cột
+  const c1524  = getCell(topRow, ["15–24", "15-24"]);
+  const c2534  = getCell(topRow, ["25–34", "25-34"]);
+  const c3554  = getCell(topRow, ["35–54", "35-54"]);
+  const c55p   = getCell(topRow, ["55+"]);
+  const cNinfo = getCell(topRow, ["no_info", "Không có thông tin tuổi", "Không có thông tin"]);
+
+  const n1524  = parseCount(c1524);
+  const n2534  = parseCount(c2534);
+  const n3554  = parseCount(c3554);
+  const n55p   = parseCount(c55p);
+  const nNinfo = parseCount(cNinfo);
+
+  return (
+    <div className="text-sm text-slate-800 mb-3 space-y-1">
+      {n1524  > 0 && <div><b>15–24 tuổi</b> ngành yêu cầu nhiều nhất là <b>{addTinLabel(c1524)}</b>.</div>}
+      {n2534  > 0 && <div><b>25–34 tuổi</b> ngành yêu cầu nhiều nhất là <b>{addTinLabel(c2534)}</b>.</div>}
+      {n3554  > 0 && <div><b>35–54 tuổi</b> ngành yêu cầu nhiều nhất là <b>{addTinLabel(c3554)}</b>.</div>}
+      {n55p   > 0 && <div><b>55+ tuổi</b> ngành yêu cầu nhiều nhất là <b>{addTinLabel(c55p)}</b>.</div>}
+      {nNinfo > 0 && <div><b>Không có thông tin tuổi</b> ngành nhiều nhất là <b>{addTinLabel(cNinfo)}</b>.</div>}
+    </div>
+  );
+}
+function ScatterWorkHoursFromSheet({ data, height = 420 }) {
+  if (!window.Recharts)
+    return <div className="text-slate-600 text-sm">Recharts chưa nạp</div>;
+  const {
+    ResponsiveContainer, ScatterChart, Scatter,
+    XAxis, YAxis, CartesianGrid, Tooltip, Legend, ReferenceLine
+  } = window.Recharts;
+
+  // ======= STATE: điểm đang hover =======
+  const [activePoint, setActivePoint] = React.useState(null);
+
+  // ------------ Helpers ------------
+  const normKey = (k) => String(k ?? "")
+    .normalize("NFKC")
+    .replace(/[\u00A0\u200B\u200C\u200D\uFEFF]/g, "")
+    .replace(/[–—−]/g, "-")
+    .trim();
+
+  const normalizeRowKeys = (row) => {
+    const out = {};
+    for (const [k, v] of Object.entries(row)) out[normKey(k)] = v;
+    return out;
+  };
+
+  const toMinutes = (t) => {
+    if (t == null || String(t).trim() === "") return null;
+    let s = String(t).trim().toLowerCase().replace(/[–—]/g, "-");
+    s = s.replace(/gi[òo]|\s/g, "").replace(".", ":");
+    let m = s.match(/^(\d{1,2}):(\d{1,2}):\d{1,2}$/);
+    if (m) return (+m[1]) * 60 + (+m[2]);
+    m = s.match(/^(\d{1,2}):(\d{1,2})$/);
+    if (m) return (+m[1]) * 60 + (+m[2]);
+    m = s.match(/^(\d{1,2})h(\d{0,2})$/);
+    if (m) return (+m[1]) * 60 + (m[2] ? +m[2] : 0);
+    m = s.match(/^(\d{1,2})$/);
+    if (m) return (+m[1]) * 60;
+    return null;
+  };
+
+  const fmtHM = (min) => {
+    if (min == null) return "";
+    const m = Math.max(0, Math.min(24 * 60, Math.round(min)));
+    const h = Math.floor(m / 60);
+    const mm = m % 60;
+    return `${String(h).padStart(2, "0")}:${String(mm).padStart(2, "0")}`;
+  };
+
+  // ------------ Chuẩn hoá dữ liệu ------------
+  const rows = (Array.isArray(data) ? data : []).map(normalizeRowKeys);
+
+  const nameKeys = ["Tên ngành", "ten_nganh", "Tên Ngành", "nganh"];
+  const colStartEarly = ["gio_bat_dau_som_nhat","Giờ bắt đầu sớm nhất","Gio bat dau som nhat"];
+  const colStartLate  = ["gio_bat_dau_muon_nhat","Giờ bắt đầu muộn nhất","Gio bat dau muon nhat"];
+  const colEndEarly   = ["gio_ket_thuc_som_nhat","Giờ kết thúc sớm nhất","Gio ket thuc som nhat"];
+  const colEndLate    = ["gio_ket_thuc_muon_nhat","Giờ kết thúc muộn nhất","Gio ket thuc muon nhat","Giờ kết thức muộn nhất"]; // fallback
+
+  const getCell = (row, keys) => {
+    for (const k of keys) {
+      const v = row[k];
+      if (v != null && String(v).trim() !== "") return v;
+    }
+    return "";
+  };
+
+  // Bỏ đúng dòng "Tổng quan"
+  const filtered = rows.filter((r) => {
+    const raw = getCell(r, nameKeys);
+    const s = String(raw || "").normalize("NFD").replace(/\p{M}/gu, "").toLowerCase().trim();
+    return s && !/^tong\s*quan$/.test(s); // chỉ bỏ "tong quan"
+  });
+
+  const mapped = filtered
+    .map((r, i) => {
+      const name = String(getCell(r, nameKeys) || "").trim();
+      const se = toMinutes(getCell(r, colStartEarly));
+      const sl = toMinutes(getCell(r, colStartLate));
+      const ee = toMinutes(getCell(r, colEndEarly));
+      const el = toMinutes(getCell(r, colEndLate));
+      return { idx: i, name, start_early: se, start_late: sl, end_early: ee, end_late: el };
+    })
+    .filter(d => d.start_early != null || d.start_late != null || d.end_early != null || d.end_late != null);
+
+  // 4 series
+  const sStartEarly = mapped.map(d => ({ x: d.idx, y: d.start_early, name: d.name })).filter(p => p.y != null);
+  const sStartLate  = mapped.map(d => ({ x: d.idx, y: d.start_late,  name: d.name })).filter(p => p.y != null);
+  const sEndEarly   = mapped.map(d => ({ x: d.idx, y: d.end_early,   name: d.name })).filter(p => p.y != null);
+  const sEndLate    = mapped.map(d => ({ x: d.idx, y: d.end_late,    name: d.name })).filter(p => p.y != null);
+
+  const xTicks = mapped.map(d => d.idx);
+
+  // ------------ Tooltip (render từ state activePoint) ------------
+  const CustomTooltip = ({ active }) => {
+    if (!active || !activePoint) return null;
+    const { color, industry, series, minutes } = activePoint;
+    return (
+      <div
+        className="bg-white/95 rounded-md shadow px-2 py-1 text-sm border"
+        style={{ borderColor: color || "#0ea5e9", borderLeftWidth: 4 }}
+      >
+        <div className="font-medium text-slate-900">{industry}</div>
+        <div className="text-slate-700">
+          <span className="font-medium">{series}</span>: {fmtHM(minutes)}
+        </div>
+      </div>
+    );
+  };
+
+  // ------------ shape tuỳ biến: cập nhật activePoint ngay khi hover ------------
+  const makeCircle = (seriesName) => (props) => {
+    const { cx, cy, fill, payload } = props;
+    return (
+      <circle
+        cx={cx} cy={cy} r={4} fill={fill} stroke="#fff" strokeWidth={1.2}
+        onMouseEnter={() =>
+          setActivePoint({
+            industry: payload?.name || "",
+            series: seriesName,
+            minutes: payload?.y ?? null,
+            color: fill,
+          })
+        }
+        onMouseMove={() =>
+          setActivePoint({
+            industry: payload?.name || "",
+            series: seriesName,
+            minutes: payload?.y ?? null,
+            color: fill,
+          })
+        }
+        onMouseLeave={() => setActivePoint(null)}
+      />
+    );
+  };
+
+  const makeTriangle = (seriesName) => (props) => {
+    const { cx, cy, fill, payload } = props;
+    const size = 8, h = (Math.sqrt(3) / 2) * size;
+    const points = [
+      [cx, cy - h / 1.2],
+      [cx - size / 2, cy + h / 2],
+      [cx + size / 2, cy + h / 2],
+    ].map(p => p.join(",")).join(" ");
+    return (
+      <polygon
+        points={points} fill={fill} stroke="#fff" strokeWidth={1.2}
+        onMouseEnter={() =>
+          setActivePoint({
+            industry: payload?.name || "",
+            series: seriesName,
+            minutes: payload?.y ?? null,
+            color: fill,
+          })
+        }
+        onMouseMove={() =>
+          setActivePoint({
+            industry: payload?.name || "",
+            series: seriesName,
+            minutes: payload?.y ?? null,
+            color: fill,
+          })
+        }
+        onMouseLeave={() => setActivePoint(null)}
+      />
+    );
+  };
+
+  return (
+    <ResponsiveContainer width="100%" height={height}>
+      <ScatterChart margin={{ top: 10, right: 16, bottom: 64, left: 10 }}>
+        <CartesianGrid strokeDasharray="3 3" />
+        <XAxis
+          type="number"
+          dataKey="x"
+          domain={[0, Math.max(0, mapped.length - 1)]}
+          ticks={xTicks}
+          tick={false}
+          height={10}
+        />
+        <YAxis
+          type="number"
+          dataKey="y"
+          domain={[5 * 60, 24 * 60]}   // 05:00 – 24:00
+          tickFormatter={fmtHM}
+          width={60}
+        />
+
+        {/* Tooltip chỉ đọc state activePoint */}
+        <Tooltip content={<CustomTooltip />} cursor={{ stroke: "rgba(0,0,0,0.2)" }} />
+        <Legend verticalAlign="bottom" height={40} />
+
+        {/* đoạn dọc start_early → end_late */}
+        {mapped.map((d, i) =>
+          d.start_early != null && d.end_late != null ? (
+            <ReferenceLine
+              key={`seg-${i}`}
+              segment={[{ x: d.idx, y: d.start_early }, { x: d.idx, y: d.end_late }]}
+              stroke="rgba(0,0,0,0.28)"
+              strokeWidth={3}
+            />
+          ) : null
+        )}
+
+        {/* 4 series với shape custom để cập nhật tooltip đúng điểm */}
+        <Scatter
+          name="Bắt đầu muộn nhất"
+          data={sStartLate}
+          fill="#22c55e"
+          shape={makeTriangle("Bắt đầu muộn nhất")}
+          legendType="triangle"
+          isAnimationActive={false}
+        />
+        <Scatter
+          name="Bắt đầu sớm nhất"
+          data={sStartEarly}
+          fill="#22c55e"
+          shape={makeCircle("Bắt đầu sớm nhất")}
+          legendType="circle"
+          isAnimationActive={false}
+        />
+        <Scatter
+          name="Kết thúc muộn nhất"
+          data={sEndLate}
+          fill="#f59e0b"
+          shape={makeTriangle("Kết thúc muộn nhất")}
+          legendType="triangle"
+          isAnimationActive={false}
+        />
+        <Scatter
+          name="Kết thúc sớm nhất"
+          data={sEndEarly}
+          fill="#ef4444"
+          shape={makeCircle("Kết thúc sớm nhất")}
+          legendType="circle"
+          isAnimationActive={false}
+        />
+      </ScatterChart>
+    </ResponsiveContainer>
+  );
+}
+function TopLinesLuongBatThuong({ data }) {
+  // ==== helpers ====
+  const normKey = (k) => String(k ?? "")
+    .normalize("NFKC")
+    .replace(/[\u00A0\u200B\u200C\u200D\uFEFF]/g, "")
+    .replace(/[–—−]/g, "-")
+    .trim();
+
+  const normalizeRowKeys = (row) => {
+    const out = {};
+    for (const [k, v] of Object.entries(row)) out[normKey(k)] = v;
+    return out;
+  };
+
+  const getCell = (row, keys) => {
+    for (const k of keys) {
+      const v = row?.[k];
+      if (v != null && String(v).trim() !== "") return String(v);
+    }
+    return "";
+  };
+
+  const noAccentLower = (s) =>
+    String(s ?? "").normalize("NFD").replace(/\p{M}/gu, "").toLowerCase().trim();
+
+  const isNoAbnormal = (s) =>
+    /khong[_\s]*phat[_\s]*hien/i.test(String(s || "").trim());
+
+  const onlyDigits = (s) => Number(String(s ?? "").replace(/[^\d]/g, "")) || 0;
+  const fmtVND = (n) => (Number.isFinite(n) ? n.toLocaleString("en-US") : "");
+
+  // ==== rows ====
+  const rows = (Array.isArray(data) ? data : []).map(normalizeRowKeys);
+
+  // ---- 1) Lấy median từ dòng Tổng quan (TB) ----
+  const nameKeys = ["Tên ngành", "ten_nganh", "Tên Ngành", "nganh"];
+  const totalRow =
+    rows.find((r) => {
+      const nm = noAccentLower(getCell(r, nameKeys));
+      return nm.includes("tong quan") || nm.startsWith("tong");
+    }) || {};
+
+  const medianKeys = [
+    "med_luong_tb",
+    "Mức lương trung bình",
+    "muc_luong_trung_binh",
+    "luong_tb",
+  ];
+  const medianRaw = getCell(totalRow, medianKeys);
+  const medianNum = medianRaw
+    ? (/\d/.test(medianRaw) ? onlyDigits(medianRaw) : Number(medianRaw))
+    : 0;
+  const medianText = medianNum ? fmtVND(medianNum) : (medianRaw || "");
+
+  // ---- 2) Gom các “chi_tiet_bat_thuong” ----
+  const detailKeyCandidates = [
+    "chi_tiet_bat_thuong", "Chi_tiet_bat_thuong",
+    "Chi tiết", "Chi tiet"
+  ];
+
+  const items = [];
+  const seen = new Set();
+
+  for (const r of rows) {
+    const raw = getCell(r, detailKeyCandidates);
+    if (!raw || isNoAbnormal(raw)) continue;
+
+    for (const chunk of raw.split(";")) {
+      const part = String(chunk || "").trim();
+      if (!part || isNoAbnormal(part)) continue;
+
+      const [left, right] = part.split("|");
+      let label = (left || "").trim().replace(/^\d+\s+/, ""); // bỏ "1 " nếu có
+
+      let url = "";
+      if (right) {
+        const m = right.match(/https?:\/\/\S+/);
+        if (m) url = m[0];
+      }
+
+      const key = `${label}|||${url}`;
+      if (!label || seen.has(key)) continue;
+      seen.add(key);
+
+      items.push({ label, url });
+    }
+  }
+
+  if (!items.length && !medianText) return null;
+
+  return (
+    <div className="text-sm text-slate-800 mb-3 space-y-1">
+      {medianText && (
+        <div>
+        <b className="text-slate-900">
+          Mức lương trung bình tất cả các ngành
+        </b>{" "}
+        <span className="whitespace-nowrap text-red-600 font-bold text-[18px]">
+          {medianText} VND/Tháng
+        </span>
+      </div>
+      )}
+
+      {items.length > 0 && (
+        <>
+          <div><b>Các tin có lương bất thường:</b></div>
+          <ul className="list-disc pl-5 space-y-1">
+            {items.map((it, idx) => (
+              <li key={idx}>
+                {it.label}{" "}
+                {it.url ? (
+                  <a
+                    href={it.url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="text-blue-600 underline"
+                  >
+                    | Click xem chi tiết
+                  </a>
+                ) : (
+                  "| Click xem chi tiết"
+                )}
+              </li>
+            ))}
+          </ul>
+        </>
+      )}
+    </div>
+  );
+}
+
+    const root =ReactDOM.render(<App />, document.getElementById('root'));
+    root.render(<App />);
+  </script>
+</body>
+</html>
