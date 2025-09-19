@@ -92,7 +92,6 @@ def list_files_under(root: Path) -> Set[str]:
 
 
 def run_script(path: Path, name: str):
-    """Chạy script python con và log file mới sinh ra."""
     assert path.exists(), f"{name} not found: {path}"
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_path = LOG_DIR / f"{name}_{ts}.log"
@@ -105,14 +104,26 @@ def run_script(path: Path, name: str):
         proc = subprocess.Popen(
             cmd,
             cwd=str(ROOT),
-            stdout=f,
+            stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             env=os.environ.copy(),
+            bufsize=1,                # line-buffered
         )
+
+        # Đọc từng dòng và ghi ra file + console
+        for raw_line in iter(proc.stdout.readline, b""):
+            f.write(raw_line)
+            try:
+                line = raw_line.decode("utf-8", "ignore").rstrip()
+                if line:
+                    log.info(f"[{name}] {line}")
+            except Exception:
+                pass
+
         ret = proc.wait()
 
     if ret != 0:
-        raise RuntimeError(f"{name} lỗi, mã thoát {ret}. Xem log: {log_path}")
+        raise RuntimeError(f"{name} exited with code {ret}. See log: {log_path}")
 
     after = list_files_under(OUTPUT_DIR)
     new_files = sorted(after - before)
