@@ -95,30 +95,33 @@ def run_script(path: Path, name: str):
     assert path.exists(), f"{name} not found: {path}"
     ts = datetime.now().strftime("%Y%m%d_%H%M%S")
     log_path = LOG_DIR / f"{name}_{ts}.log"
-    cmd = [PY, str(path)]
+
+    # CHẠY UNBUFFERED để print() đẩy ngay
+    cmd = [PY, "-u", str(path)]
 
     log.info(f"▶️ Chạy {name}: {' '.join(cmd)}")
 
     before = list_files_under(OUTPUT_DIR)
-    with open(log_path, "ab", buffering=0) as f:
+
+    # Ghi file log ở TEXT mode, đọc stdout ở TEXT mode + line-buffered
+    with open(log_path, "a", encoding="utf-8") as f:
         proc = subprocess.Popen(
             cmd,
             cwd=str(ROOT),
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            env=os.environ.copy(),
-            bufsize=1,                # line-buffered
+            env={**os.environ, "PYTHONUNBUFFERED": "1"},
+            text=True,   # <— QUAN TRỌNG: bật text mode
+            bufsize=1,   # <— line-buffered (chỉ hiệu lực khi text=True)
         )
 
-        # Đọc từng dòng và ghi ra file + console
-        for raw_line in iter(proc.stdout.readline, b""):
-            f.write(raw_line)
-            try:
-                line = raw_line.decode("utf-8", "ignore").rstrip()
-                if line:
-                    log.info(f"[{name}] {line}")
-            except Exception:
-                pass
+        # Đọc từng dòng -> ghi file + đẩy ra console ngay
+        for line in proc.stdout:
+            line = line.rstrip("\n")
+            if line:
+                f.write(line + "\n")
+                f.flush()
+                log.info(f"[{name}] {line}")
 
         ret = proc.wait()
 
@@ -132,7 +135,6 @@ def run_script(path: Path, name: str):
             log.info(f"📄 {name} đã tạo file: {nf}")
     else:
         log.info(f"ℹ️ {name} hoàn tất, không phát hiện file mới.")
-
     log.info(f"✅ Kết thúc {name}. Log: {log_path}")
 
 
@@ -159,15 +161,8 @@ def pipeline():
     finally:
         _running_flag.clear()
 
-
 def manage_services():
-    """Khởi động / enable nginx và fastapi service."""
-    os.chdir(str(ROOT))
-    run_cmd("sudo nginx -t")
-    run_cmd("sudo systemctl start nginx")
-    run_cmd("sudo systemctl enable nginx")
-    # Đổi tên 'fastapi' nếu service bạn đặt khác
-    run_cmd("sudo systemctl restart fastapi")
+    run_cmd("sudo systemctl status nginx --no-pager")
     run_cmd("sudo systemctl status fastapi --no-pager")
 
 
