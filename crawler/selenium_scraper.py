@@ -144,6 +144,22 @@ def _extract_links_stepwise_from_card(card) -> List[str]:
         pass
     return links
 
+def create_driver():
+    options = Options()
+    options.add_argument("--headless=new")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--window-size=1920,1080")
+    options.add_argument(
+        "user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+    )
+
+    driver = webdriver.Chrome(options=options)
+    driver.set_page_load_timeout(60)   # tối đa 60s load trang
+    driver.set_script_timeout(60)      # timeout khi chạy JS
+    return driver
 
 def get_vietnamworks_jobs_by_group(
     group_id: int,
@@ -187,16 +203,8 @@ def get_vietnamworks_jobs_by_group(
     base_url = f"{BASE}/viec-lam?g={group_id}"
 
     # ---- Khởi tạo Chrome WebDriver ----
-    options = Options()
-    # options.add_argument("--headless=new")   # có thể bật khi chạy server/CI để tiết kiệm tài nguyên
-    options.add_argument("--disable-gpu")
-    options.add_argument("--window-size=1920,1080")  # viewport lớn giúp lazy-load/selector ổn định
-    options.add_argument(
-        "user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    )
-    driver = webdriver.Chrome(options=options)
-    wait = WebDriverWait(driver, 12)  # Explicit wait cho element chủ đạo (giảm phụ thuộc vào sleep mù)
+    driver = create_driver()
+    wait = WebDriverWait(driver, 25)   # tăng timeout từ 12 → 25s
 
     # ---- Biến trạng thái thu thập ----
     results: List[Dict] = []      # chứa record tối thiểu cho từng job
@@ -455,15 +463,8 @@ def scrape_job_details_from_links(job_links: List[str], start_id: int = 1000001)
     # Ghi chú triển khai:
     # - "--window-size" cố định giúp layout ổn định, tránh case giao diện mobile.
     # - Headless đôi khi render khác headful; nếu selector lỗi ở headless thì chuyển sang headful để kiểm chứng.
-    options = Options()
-    # options.add_argument("--headless=new")
-    options.add_argument("--disable-gpu")
-    options.add_argument("--window-size=1920,1080")  # viewport lớn giúp lazy-load ổn định
-
-    # Mở 1 phiên trình duyệt dùng chung cho toàn bộ link (tối ưu chi phí mở/đóng)
-    # Lý do: khởi tạo/huỷ WebDriver tốn thời gian và tài nguyên; tái sử dụng 1 driver cho cả batch sẽ hiệu quả hơn.
-    driver = webdriver.Chrome(options=options)
-    wait = WebDriverWait(driver, 10)  # chờ body render để đảm bảo DOM sẵn sàng
+    driver = create_driver()
+    wait = WebDriverWait(driver, 30)   # chi tiết cần chờ lâu hơn
 
     all_jobs = []  # danh sách dict từng job để ghép thành DataFrame
     # Quy ước dữ liệu:
