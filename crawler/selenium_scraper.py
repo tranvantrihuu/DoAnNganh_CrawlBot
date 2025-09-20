@@ -659,8 +659,8 @@ if __name__ == "__main__":
     # - LOCATION_CODE ở đây CHỈ tham gia vào tên tệp, không lọc dữ liệu trong hàm listing theo ngành.
     # - Nếu cần lọc theo location khi crawl THEO NGÀNH, phải mở rộng hàm get_vietnamworks_jobs_by_group tương ứng.
     LOCATION_CODE = r"1001"          # Chỉ dùng trong tên file ở khối dưới; không ảnh hưởng filter nếu hàm list không dùng
-    LIST_OUT_DIR = r"output\jobslist"         # Thư mục lưu file danh sách (mỗi ngành 1 file)
-    DETAIL_OUT_DIR = r"output\jobsdetail"     # Thư mục lưu file chi tiết
+    LIST_OUT_DIR = r"output/jobslist"         # Thư mục lưu file danh sách (mỗi ngành 1 file)
+    DETAIL_OUT_DIR = r"output/jobsdetail"     # Thư mục lưu file chi tiết
     MAX_PAGES = 0                    # 0 = đi hết theo điều kiện dừng (no_gain/safety)
     DELAY = 1.0                      # delay giữa các trang khi crawl list
     NO_GAIN_PATIENCE = 2             # số trang liên tiếp không có link mới -> dừng

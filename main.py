@@ -90,54 +90,35 @@ def run_cmd(cmd: str):
 def list_files_under(root: Path) -> Set[str]:
     return {p.name for p in root.rglob("*") if p.is_file()}
 
-
-def run_script(path: Path, name: str):
-    assert path.exists(), f"{name} not found: {path}"
-    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-    log_path = LOG_DIR / f"{name}_{ts}.log"
-
-    # CHẠY UNBUFFERED để print() đẩy ngay
-    cmd = [PY, "-u", str(path)]
-
-    log.info(f"▶️ Chạy {name}: {' '.join(cmd)}")
-
-    before = list_files_under(OUTPUT_DIR)
-
-    # Ghi file log ở TEXT mode, đọc stdout ở TEXT mode + line-buffered
-    with open(log_path, "a", encoding="utf-8") as f:
+def run_script(path, name, timeout=None):
+    log_path = LOG_DIR / f"{name}_{datetime.now():%Y%m%d_%H%M%S}.log"
+    with open(log_path, "w") as lf:
+        # Tạo group cho phép kill cả cây tiến trình
         proc = subprocess.Popen(
-            cmd,
-            cwd=str(ROOT),
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            env={**os.environ, "PYTHONUNBUFFERED": "1"},
-            text=True,   # <— QUAN TRỌNG: bật text mode
-            bufsize=1,   # <— line-buffered (chỉ hiệu lực khi text=True)
+            [PY, str(path)],
+            stdout=lf, stderr=lf,
+            preexec_fn=os.setsid  # Linux: tách process group
         )
+        try:
+            ret = proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            os.killpg(proc.pid, signal.SIGTERM)
+            time.sleep(2)
+            os.killpg(proc.pid, signal.SIGKILL)
+            raise RuntimeError(f"{name} timed out. See log: {log_path}")
 
-        # Đọc từng dòng -> ghi file + đẩy ra console ngay
-        for line in proc.stdout:
-            line = line.rstrip("\n")
-            if line:
-                f.write(line + "\n")
-                f.flush()
-                log.info(f"[{name}] {line}")
-
-        ret = proc.wait()
+    # Diệt “đuôi” nếu còn (Chrome/driver)
+    try:
+        p = psutil.Process(proc.pid)
+    except psutil.NoSuchProcess:
+        p = None
+    if p:
+        for child in p.children(recursive=True):
+            try: child.kill()
+            except Exception: pass
 
     if ret != 0:
         raise RuntimeError(f"{name} exited with code {ret}. See log: {log_path}")
-
-    after = list_files_under(OUTPUT_DIR)
-    new_files = sorted(after - before)
-    if new_files:
-        for nf in new_files:
-            log.info(f"📄 {name} đã tạo file: {nf}")
-    else:
-        log.info(f"ℹ️ {name} hoàn tất, không phát hiện file mới.")
-    log.info(f"✅ Kết thúc {name}. Log: {log_path}")
-
-
 def pipeline():
     """Chạy pipeline tuần tự, có khóa tránh chạy trùng."""
     if _running_flag.is_set():
@@ -162,6 +143,7 @@ def pipeline():
         _running_flag.clear()
 
 def manage_services():
+    run_cmd("sudo systemctl restart fastapi")
     run_cmd("sudo systemctl status nginx --no-pager")
     run_cmd("sudo systemctl status fastapi --no-pager")
 
@@ -170,8 +152,8 @@ def manage_services():
 
 def start_scheduler():
     sched = BackgroundScheduler(timezone="Asia/Ho_Chi_Minh")
-    # Hẹn giờ: Thứ Hai 23:59
-    trigger = CronTrigger(day_of_week="mon", hour=23, minute=59)
+    # Hẹn giờ: Thứ Ba 00:00
+    trigger = CronTrigger(day_of_week="tue", hour=00, minute=00)
     sched.add_job(
         pipeline,
         trigger,
@@ -181,14 +163,14 @@ def start_scheduler():
         misfire_grace_time=3600 # cho phép muộn 1h
     )
     sched.start()
-    log.info("⏰ Scheduler đã bật: Thứ Hai hàng tuần lúc 23:59 (giờ VN)")
+    log.info("⏰ Scheduler đã bật: Thứ Ba hàng tuần lúc 00:00 (giờ VN)")
     return sched
 
 
 # ====== MAIN ======
 
 def main():
-    log.info("===== Orchestrator khởi động (t3.micro) =====")
+    log.info("===== Orchestrator khởi động (t3.small) =====")
 
     # Bật scheduler
     scheduler = start_scheduler()
