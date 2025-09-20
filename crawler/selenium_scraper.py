@@ -349,39 +349,6 @@ def save_group_to_excel(rows: List[Dict], group_name: str, location_code: str = 
     return path
 
 
-def crawl_all_groups(
-    groups: Dict[str, int] = VNWORKS_GROUPS,
-    max_pages: int = 0,
-    delay: float = 1.0,
-    safety_max_pages: int = 200,
-    no_gain_patience: int = 2,
-    location_code: str = "1001",
-    out_dir: str = "outputs",
-):
-    # Lặp qua từng ngành (group_name, gid) trong map cấu hình
-    # Triết lý triển khai:
-    # - Mỗi ngành chạy độc lập: nếu 1 ngành lỗi, các ngành khác vẫn tiếp tục (batch bền bỉ).
-    # - Tham số (max_pages, delay, no_gain_patience) truyền xuyên suốt để giữ hành vi nhất quán.
-    for group_name, gid in groups.items():
-        try:
-            # Gọi crawler cho từng group_id; các tham số kiểm soát vòng lặp trang
-            # Ghi chú: safety_max_pages được áp dụng ngay trong get_vietnamworks_jobs_by_group (cầu chì vòng lặp).
-            rows = get_vietnamworks_jobs_by_group(
-                group_id=gid,
-                group_name=group_name,
-                max_pages=max_pages,
-                delay=delay,
-                no_gain_patience=no_gain_patience,
-            )
-            # Ghi kết quả riêng từng ngành ra file Excel (đặt tên theo group + location_code)
-            # Lợi ích: pipeline xử lý phía sau (tiền xử lý/biểu đồ) dễ chọn đúng file theo ngành/địa điểm.
-            save_group_to_excel(rows, group_name, location_code=location_code, out_dir=out_dir)
-        except Exception as e:
-            # Bắt mọi lỗi để không làm dừng toàn bộ batch; log tên ngành + id
-            # Thực tế: DOM có thể thay đổi theo đợt deploy → nếu lỗi 1 ngành, vẫn muốn thu thập ngành còn lại.
-            print(f"[ERROR] {group_name} (g={gid}): {e}")
-
-
 # ===================== PHẦN 2: Hàm hỗ trợ bóc chi tiết =====================
 
 def _extract_benefits(driver) -> str:
