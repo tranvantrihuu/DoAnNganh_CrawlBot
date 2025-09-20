@@ -1,19 +1,5 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
-"""
-Trình điều phối cho Ubuntu (AWS t3.micro):
-- Chạy pipeline tuần tự (selenium_scraper.py -> preprocess.py -> analyzer.py)
-- Khi start main.py sẽ chạy ngay một lần
-- Đồng thời hẹn giờ chạy lại vào mỗi Thứ Hai lúc 23:59 (giờ Việt Nam)
-- Song song quản lý dịch vụ web (nginx / fastapi)
-- Ghi log chi tiết, báo các file mới sinh ra
-- Tối ưu để tránh quá tải cho t3.micro
-
-Yêu cầu:
-  pip install apscheduler
-
-Khuyến nghị: chạy file này bằng systemd service để luôn hoạt động nền.
-"""
 
 import os
 import sys
@@ -89,33 +75,94 @@ def run_cmd(cmd: str):
 
 def list_files_under(root: Path) -> Set[str]:
     return {p.name for p in root.rglob("*") if p.is_file()}
+def _kill_process_tree_pgid(pgid: int, gentle_seconds: float = 2.0):
+    """Kill cả group theo PGID: SIGTERM -> chờ -> SIGKILL."""
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    time.sleep(gentle_seconds)
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
 
-def run_script(path, name, timeout=None):
-    log_path = LOG_DIR / f"{name}_{datetime.now():%Y%m%d_%H%M%S}.log"
-    with open(log_path, "w") as lf:
-        # Tạo group cho phép kill cả cây tiến trình
-        proc = subprocess.Popen(
-            [PY, str(path)],
-            stdout=lf, stderr=lf,
-            preexec_fn=os.setsid  # Linux: tách process group
-        )
+def _reap_children_by_name(names=("chrome", "chromedriver", "Xvfb")):
+    """Diệt các tiến trình rơi rớt theo tên (phòng hờ driver còn sống)."""
+    for p in psutil.process_iter(["name", "cmdline"]):
         try:
+            nm = (p.info.get("name") or "").lower()
+            cmd = " ".join(p.info.get("cmdline") or []).lower()
+            if any(n in nm or n in cmd for n in names):
+                p.kill()
+        except Exception:
+            pass
+
+def run_script(path: Path, name: str, timeout: float | None = None) -> None:
+    """
+    Chạy file Python con:
+    - Ghi log vào file + stream realtime ra terminal
+    - Tạo process group để kill cả cây
+    - Thu dọn RAM/child processes sau khi xong
+    """
+    log_path = LOG_DIR / f"{name}_{datetime.now():%Y%m%d_%H%M%S}.log"
+
+    # môi trường unbuffered cho log tức thời
+    env = os.environ.copy()
+    env["PYTHONUNBUFFERED"] = "1"
+
+    with open(log_path, "w", buffering=1) as lf:
+        # -u để stdout/stderr không buffer
+        proc = subprocess.Popen(
+            [PY, "-u", str(path)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            bufsize=1,
+            env=env,
+            preexec_fn=os.setsid,  # Linux: tạo process group mới (PGID = PID)
+        )
+
+        # PGID để kill cả cây sau này
+        pgid = os.getpgid(proc.pid)
+
+        try:
+            # stream từng dòng: terminal + file
+            assert proc.stdout is not None
+            for line in iter(proc.stdout.readline, ""):
+                # hiện trên terminal (orchestrator)
+                sys.stdout.write(line)
+                # ghi file log
+                lf.write(line)
+                lf.flush()
             ret = proc.wait(timeout=timeout)
         except subprocess.TimeoutExpired:
-            os.killpg(proc.pid, signal.SIGTERM)
-            time.sleep(2)
-            os.killpg(proc.pid, signal.SIGKILL)
+            _kill_process_tree_pgid(pgid)
             raise RuntimeError(f"{name} timed out. See log: {log_path}")
+        finally:
+            # đóng stream sớm để giải phóng FD
+            try:
+                if proc.stdout:
+                    proc.stdout.close()
+            except Exception:
+                pass
 
-    # Diệt “đuôi” nếu còn (Chrome/driver)
+    # Thu dọn tiến trình con còn sót
     try:
         p = psutil.Process(proc.pid)
+        for c in p.children(recursive=True):
+            try:
+                c.kill()
+            except Exception:
+                pass
     except psutil.NoSuchProcess:
-        p = None
-    if p:
-        for child in p.children(recursive=True):
-            try: child.kill()
-            except Exception: pass
+        pass
+
+    # Dọn “mồ côi” phổ biến (chrome/driver)
+    _reap_children_by_name()
+
+    # Thu gom rác Python
+    gc.collect()
 
     if ret != 0:
         raise RuntimeError(f"{name} exited with code {ret}. See log: {log_path}")
