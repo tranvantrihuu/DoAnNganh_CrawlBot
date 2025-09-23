@@ -12,6 +12,14 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.common.action_chains import ActionChains
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+import gc
+from pathlib import Path
+
+# === PATH ROOTS: luôn lưu ở <project-root>/output/... thay vì crawler/output/... ===
+_THIS_FILE = Path(__file__).resolve()
+# nếu file nằm trong thư mục "crawler", project-root là cha của nó; ngược lại là chính thư mục hiện tại
+_PROJECT_ROOT = _THIS_FILE.parent.parent if _THIS_FILE.parent.name.lower() == "crawler" else _THIS_FILE.parent
+_OUTPUT_ROOT = _PROJECT_ROOT / "output"
 
 # ===========================================================
 # MỤC ĐÍCH TỆP: CÁC HÀM & HẰNG SỐ PHỤ TRỢ CHO BỘ THU THẬP
@@ -143,6 +151,54 @@ def _extract_links_stepwise_from_card(card) -> List[str]:
         # Card không theo cấu trúc kỳ vọng -> bỏ qua yên lặng (tránh gãy luồng xử lý).
         pass
     return links
+# === NEW: Append lô bản ghi vào .xlsx mà không cần giữ cả bảng trong RAM ===
+def _append_batch_to_excel(excel_path: str, records: List[Dict], sheet_name: str = "jobs") -> None:
+    """
+    Ghi thêm (append) một lô dict vào file Excel.
+    - Tự tạo file nếu chưa có.
+    - Tự mở rộng header khi xuất hiện key mới.
+    - Sau khi ghi xong, đóng workbook ngay để giải phóng RAM.
+    """
+    if not records:
+        return
+
+    try:
+        from openpyxl import Workbook, load_workbook  # dùng openpyxl để append row theo dòng
+    except Exception as _:
+        # Phòng khi thiếu openpyxl (nhưng nên cài). Tối thiểu vẫn không crash pipeline.
+        # Bạn chỉ cần: pip install openpyxl
+        raise ModuleNotFoundError("Thiếu 'openpyxl'. Hãy: pip install openpyxl")
+
+    excel_path = str(excel_path)
+    path = Path(excel_path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+
+    if path.exists():
+        wb = load_workbook(excel_path)
+        ws = wb[sheet_name] if sheet_name in wb.sheetnames else wb.create_sheet(sheet_name)
+        headers = [c.value for c in ws[1]] if ws.max_row >= 1 else []
+    else:
+        wb = Workbook()
+        ws = wb.active
+        ws.title = sheet_name
+        headers = []
+
+    # Hợp nhất header cũ + key mới (giữ thứ tự cũ, thêm cột mới vào cuối)
+    for rec in records:
+        for k in rec.keys():
+            if k not in headers:
+                headers.append(k)
+
+    # Ghi (hoặc cập nhật) hàng header
+    for col_idx, h in enumerate(headers, start=1):
+        ws.cell(row=1, column=col_idx, value=h)
+
+    # Append từng dòng theo thứ tự headers
+    for rec in records:
+        ws.append([rec.get(h, "") for h in headers])
+
+    wb.save(excel_path)
+    wb.close()
 
 def create_driver():
     options = Options()
@@ -388,7 +444,7 @@ def _get_text_by_class(soup, tag, class_part, index=0) -> str:
     return els[index].get_text(strip=True) if len(els) > index else ""
 
 
-def _click_expand_buttons(driver, wait: WebDriverWait, max_clicks: int = 20):
+def _click_expand_buttons(driver, max_clicks: int = 20):
     # Click các nút "Xem thêm"/"Xem đầy đủ mô tả công việc" để mở rộng nội dung ẩn
     # Bối cảnh: nhiều trang chi tiết rút gọn mô tả bằng accordion; cần mở ra để Soup thu đủ nội dung.
     # Lưu ý: tham số 'wait' hiện chưa được sử dụng (giữ để đồng bộ interface, có thể hữu ích nếu chờ element động)
@@ -425,81 +481,59 @@ def _click_expand_buttons(driver, wait: WebDriverWait, max_clicks: int = 20):
         print(f"  [INFO] Đã click mở rộng {clicked_count} lần.")
 
 # ===================== PHẦN 3: Crawl chi tiết job =====================
-def scrape_job_details_from_links(job_links: List[str], start_id: int = 1000001) -> pd.DataFrame:
-    # Cấu hình Chrome. Có thể bật headless khi chạy server/CI để tiết kiệm tài nguyên.
-    # Ghi chú triển khai:
-    # - "--window-size" cố định giúp layout ổn định, tránh case giao diện mobile.
-    # - Headless đôi khi render khác headful; nếu selector lỗi ở headless thì chuyển sang headful để kiểm chứng.
+# === NEW: Bóc chi tiết dạng streaming, ghi ra Excel ngay để nhẹ RAM ===
+def scrape_job_details_streaming_to_excel(job_links: List[str],
+                                          out_xlsx_path: str,
+                                          start_id: int = 1000001,
+                                          batch_size: int = 20) -> int:
+    """
+    Bóc chi tiết từng link và GHI THẲNG ra Excel theo lô (batch_size) để giải phóng RAM ngay.
+    Trả về: tổng số job đã ghi.
+    """
     driver = create_driver()
-    wait = WebDriverWait(driver, 30)   # chi tiết cần chờ lâu hơn
+    wait = WebDriverWait(driver, 30)
 
-    all_jobs = []  # danh sách dict từng job để ghép thành DataFrame
-    # Quy ước dữ liệu:
-    # - Mỗi bản ghi là 1 dict gồm trường cố định (ID, HREF) + các trường bóc được (tiêu đề, lương, mô tả, phúc lợi...).
-    # - Các trường phụ thuộc DOM (class styled-components) có thể trống nếu website đổi class → xử lý downstream cần tolerant.
+    batch: List[Dict] = []
+    total_written = 0
 
     try:
         for index, job_url in enumerate(job_links):
             print(f"\n[{index + 1}/{len(job_links)}] Đang xử lý: {job_url}")
             try:
-                # Điều hướng đến trang job chi tiết
                 driver.get(job_url)
                 wait.until(EC.presence_of_element_located((By.TAG_NAME, "body")))
-
-                # Cho trang có thời gian load, sau đó scroll xuống đáy để kích hoạt lazy-load
-                # Lý do: nhiều phần (mô tả/phúc lợi) chỉ render khi người dùng cuộn xuống.
                 time.sleep(1.2)
                 driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
                 time.sleep(0.8)
+                _click_expand_buttons(driver, max_clicks=20)
+                time.sleep(1.0)
 
-                # Mở rộng các vùng mô tả bị ẩn ("Xem thêm", "Xem đầy đủ mô tả công việc")
-                # Mục tiêu: đảm bảo BeautifulSoup nhìn thấy full nội dung để bóc text sạch, tránh thiếu đoạn.
-                _click_expand_buttons(driver, wait, max_clicks=20)
-                time.sleep(1.0)  # đợi DOM render sau khi expand
-
-                # Trích phúc lợi (dạng text nhiều dòng)
-                # Tách riêng bước phúc lợi để dễ thay đổi chiến lược selector tại một nơi.
                 benefits_text = _extract_benefits(driver)
-
-                # Dùng BeautifulSoup để parse HTML sau cùng (đã expand)
-                # Lợi thế của Soup: xử lý văn bản thuận tiện (get_text, separator), dễ map ra dict.
                 soup = BeautifulSoup(driver.page_source, "html.parser")
 
-                # Khởi tạo dict trường dữ liệu chính. Lưu ý: class như 'hAejeW', 'cVbwLK', 'ePOHWr'
-                # là class styled-component -> dễ thay đổi theo build; khi đổi sẽ trả rỗng.
-                # Chúng tôi chấp nhận rủi ro này và sẽ cập nhật selector khi phát hiện thay đổi DOM.
                 job_fields = {
-                    "ID": start_id + index,  # ID nội bộ tăng dần để quản lý
+                    "ID": start_id + index,
                     "Tên công việc": _get_text_by_class(soup, "h1", "hAejeW"),
                     "Lương": _get_text_by_class(soup, "span", "cVbwLK"),
                     "Hết hạn": _get_text_by_class(soup, "span", "ePOHWr", 0),
                     "Lượt xem": _get_text_by_class(soup, "span", "ePOHWr", 1),
-                    "Địa điểm tuyển dụng": _get_text_by_class(soup, "span", "ePOHWr", 2)
+                    "Địa điểm tuyển dụng": _get_text_by_class(soup, "span", "ePOHWr", 2),
                 }
 
-                # Mỗi section mô tả có pattern:
-                #   div.gDSEwb  -> chứa
-                #       h2.cjuZti   (tiêu đề mục, ví dụ "Mô tả công việc")
-                #       div.dVvinc  (nội dung chi tiết)
-                # Chiến lược: map tiêu đề section → nội dung, giúp giữ cấu trúc tự mô tả, thuận tiện khi phân tích text.
+                # Section mô tả
                 description_sections = soup.find_all("div", class_=lambda x: x and "gDSEwb" in x)
                 for section in description_sections:
                     title_tag = section.find("h2", class_=lambda x: x and "cjuZti" in x)
                     content_tag = section.find("div", class_=lambda x: x and "dVvinc" in x)
                     if title_tag and content_tag:
                         title = title_tag.get_text(strip=True)
-                        # separator="\n" để giữ xuống dòng -> đọc dễ hơn, phục vụ xử lý text sau này (tokenize/bigram…)
                         content = content_tag.get_text(separator="\n", strip=True)
-                        job_fields[title] = content  # map theo tiêu đề section
+                        job_fields[title] = content
 
-                # Gán phúc lợi đã trích ở trên
-                # Lưu ý: định dạng "tiêu đề: nhiều dòng" giúp đọc hiểu nhanh khi xuất Excel.
+                # Phúc lợi
                 job_fields["Phúc lợi"] = benefits_text
 
-                # Khu vực thông tin theo cặp Label/Value (ví dụ: "Cấp bậc", "Kinh nghiệm", "Hình thức")
-                #   div.dHvFzj -> nhiều item JtIju
-                #       label.dfyRSX (nhãn) + p.cLLblL (giá trị)
-                # Cách làm: duyệt từng cặp nhãn-giá trị và ghi thẳng vào dict job_fields dưới key là nhãn.
+                # Cặp Label/Value
                 job_info_section = soup.find("div", class_=lambda x: x and "dHvFzj" in x)
                 if job_info_section:
                     info_items = job_info_section.find_all("div", class_=lambda x: x and "JtIju" in x)
@@ -509,18 +543,14 @@ def scrape_job_details_from_links(job_links: List[str], start_id: int = 1000001)
                         if label_tag and value_tag:
                             job_fields[label_tag.get_text(strip=True)] = value_tag.get_text(strip=True)
 
-                # Địa điểm làm việc (cụ thể hơn so với 'Địa điểm tuyển dụng' ở trên)
-                #   div.bAqPjv -> p.cLLblL
-                # Mục tiêu: tách rõ "nơi làm việc thực tế" (đôi khi khác cụm hiển thị chung).
+                # Địa điểm làm việc
                 loc = soup.find("div", class_=lambda x: x and "bAqPjv" in x)
                 if loc:
                     val = loc.find("p", class_=lambda x: x and "cLLblL" in x)
                     if val:
                         job_fields["Địa điểm làm việc"] = val.get_text(strip=True)
 
-                # Thông tin công ty: tên & quy mô
-                #   div.drWnZq -> name trong a.egZKeY, size trong span.ePOHWr
-                # Lưu thêm "Quy mô công ty" để phục vụ phân tích tương quan (quy mô vs lương/yêu cầu).
+                # Công ty
                 comp = soup.find("div", class_=lambda x: x and "drWnZq" in x)
                 if comp:
                     name = comp.find("a", class_=lambda x: x and "egZKeY" in x)
@@ -530,131 +560,62 @@ def scrape_job_details_from_links(job_links: List[str], start_id: int = 1000001)
                     if size:
                         job_fields["Quy mô công ty"] = size.get_text(strip=True)
 
-                # Lưu lại URL nguồn để trace/debug
-                # Nguyên tắc reproducibility: luôn giữ tham chiếu về nguồn gốc dữ liệu.
                 job_fields["HREF"] = job_url
 
-                # Thêm vào danh sách kết quả
-                all_jobs.append(job_fields)
+                # Dồn vào batch
+                batch.append(job_fields)
+
+                # Đủ lô -> ghi ra file & dọn RAM
+                if len(batch) >= batch_size:
+                    _append_batch_to_excel(out_xlsx_path, batch, sheet_name="jobs")
+                    total_written += len(batch)
+                    batch.clear()
+                    del soup, job_fields, benefits_text
+                    gc.collect()
 
             except Exception as e:
-                # Không để vỡ cả batch khi 1 link lỗi; log và tiếp tục
-                # Ví dụ lỗi phổ biến: timeout, DOM thay đổi nhẹ, job đã bị gỡ (404).
                 print(f"  ❌ Lỗi khi xử lý link: {e}")
+                # tiếp tục link sau
 
     finally:
-        # Đảm bảo đóng driver dù thành công hay lỗi
-        # Tránh rò rỉ tiến trình Chrome/ChromeDriver, nhất là khi chạy nhiều batch.
         driver.quit()
 
-    # Trả về DataFrame tổng hợp tất cả job đã bóc
-    # Downstream có thể to_excel(...) hoặc merge với bảng listing bằng khóa HREF.
-    return pd.DataFrame(all_jobs)
+    # Flush phần còn lại
+    if batch:
+        _append_batch_to_excel(out_xlsx_path, batch, sheet_name="jobs")
+        total_written += len(batch)
+        batch.clear()
+        gc.collect()
 
+    print(f"[DETAIL][STREAM] Đã ghi {total_written} job vào: {out_xlsx_path}")
+    return total_written
 
-# ===================== PHẦN 4: Pipeline end-to-end =====================
-# Mục tiêu khối này:
-# - Cung cấp 2 lối vận hành:
-#   (A) run_vnw_scraper(...): quy trình end-to-end cho TRƯỜNG HỢP TÌM THEO KEYWORD (độc lập với lặp qua ngành).
-#   (B) Khối __main__: quy trình end-to-end THEO NGÀNH (duyệt VNWORKS_GROUPS), xuất 2 loại tệp cho mỗi ngành:
-#       + File danh sách (list) các link việc làm theo ngành.
-#       + File chi tiết (detail) bóc từ các link ở trên, đặt tên kèm dấu thời gian để tránh ghi đè.
-# - Triết lý thiết kế: pipeline "chịu lỗi" (fault-tolerant) theo từng đơn vị công việc (mỗi ngành/mỗi link),
-#   có log rõ ràng để kiểm thử/đối soát, và giữ tính tái lập (reproducibility) qua việc đóng dấu tên tệp.
-
-def run_vnw_scraper(keyword: str, location_code: str = "1001",
-                    output_dir: str = "output/jobs", max_pages: int = 0,
-                    start_id: int = 1000001) -> Dict[str, str]:
-    # Đảm bảo thư mục đầu ra tồn tại
-    # Lý do: tránh lỗi I/O khi lần đầu chạy trên máy/CI chưa có sẵn cấu trúc thư mục.
-    os.makedirs(output_dir, exist_ok=True)
-
-    # Chuẩn hóa tên file từ keyword: thay ký tự không phải chữ/số thành "_", bỏ "_" thừa, lowercase
-    # Mục đích: tên tệp bền vững, an toàn trên nhiều hệ điều hành, thuận tiện truy hồi.
-    safe_keyword = re.sub(r"\W+", "_", keyword.strip()).strip("_").lower()
-    # Dùng ngày hiện tại để đóng dấu file danh sách/chi tiết theo định dạng dd-mm-YYYY
-    # (Lưu ý: phía dưới phần __main__ dùng run_ts = YYYY-mm-dd_HHMMSS nên khác format)
-    # Việc dùng định dạng ngày trong tên tệp giúp phân biệt các lần chạy trong ngày (ở mức ngày).
-    date_str = datetime.now().strftime("%d-%m-%Y")
-
-    print(f"[INFO] Đang tìm kiếm với từ khóa: '{keyword}', địa điểm: '{location_code}'")
-    # GỌI HÀM TÌM DANH SÁCH THEO KEYWORD:
-    # ***LƯU Ý***: Hàm get_vietnamworks_jobs_by_group ở file trước đó dùng group_id/group_name,
-    # trong khi ở đây gọi theo keyword/location_code. Bạn cần đúng phiên bản hàm hỗ trợ keyword.
-    # Mục đích cmt này: nhắc người đọc/giảng viên rằng có 2 biến thể crawler (theo ngành vs theo keyword).
-    job_list = get_vietnamworks_jobs_by_group(
-        keyword=keyword,
-        location_code=location_code,
-        max_pages=max_pages
-    )
-    # Không có kết quả -> ném lỗi để caller biết và dừng
-    # Lý do: pipeline end-to-end cần fail-fast ở điểm này để không tạo tệp rỗng/tệp sai lệch.
-    if not job_list:
-        raise RuntimeError("Không thu được job nào ở bước danh sách.")
-
-    # Lưu danh sách cơ bản (href, group_id/name nếu có…) trước khi bóc chi tiết
-    # Quy ước: xuất sheet "jobs", không ghi index, tên tệp gồm keyword + location + ngày.
-    df_list = pd.DataFrame(job_list)
-    list_path = os.path.join(
-        output_dir,
-        f"vietnamworks_jobs_{safe_keyword}_{location_code}_{date_str}.xlsx"
-    )
-    df_list.to_excel(list_path, index=False)
-    print(f"[✔] Đã lưu danh sách: {list_path}")
-
-    # Bóc chi tiết từng link (mở trang detail, mở rộng nội dung, trích trường…)
-    # Chúng tôi tách rõ 2 pha (list → detail) để:
-    # - Dễ tái chạy chỉ pha chi tiết khi selector thay đổi.
-    # - Cho phép kiểm thử chất lượng list trước khi tốn thời gian crawl chi tiết.
-    links = df_list["href"].dropna().tolist()
-    df_detail = scrape_job_details_from_links(links, start_id=start_id)
-    detail_path = os.path.join(
-        output_dir,
-        f"job_detail_output_{safe_keyword}_{location_code}_{date_str}.xlsx"
-    )
-    df_detail.to_excel(detail_path, index=False)
-    print(f"[✔] Đã lưu chi tiết: {detail_path}")
-
-    # Trả về đường dẫn 2 file để caller có thể dùng tiếp
-    # Điều này hỗ trợ việc ghép vào các bước tiền xử lý/phân tích/biểu đồ phía sau.
-    return {"list_path": list_path, "detail_path": detail_path}
 
 
 if __name__ == "__main__":
     # ==== THAM SỐ CHUNG ====
-    # Ghi chú:
-    # - LOCATION_CODE ở đây CHỈ tham gia vào tên tệp, không lọc dữ liệu trong hàm listing theo ngành.
-    # - Nếu cần lọc theo location khi crawl THEO NGÀNH, phải mở rộng hàm get_vietnamworks_jobs_by_group tương ứng.
-    LOCATION_CODE = r"1001"          # Chỉ dùng trong tên file ở khối dưới; không ảnh hưởng filter nếu hàm list không dùng
-    LIST_OUT_DIR = r"output/jobslist"         # Thư mục lưu file danh sách (mỗi ngành 1 file)
-    DETAIL_OUT_DIR = r"output/jobsdetail"     # Thư mục lưu file chi tiết
-    MAX_PAGES = 0                    # 0 = đi hết theo điều kiện dừng (no_gain/safety)
-    DELAY = 1.0                      # delay giữa các trang khi crawl list
-    NO_GAIN_PATIENCE = 2             # số trang liên tiếp không có link mới -> dừng
-    START_ID_BASE = 1000001          # ID khởi tạo cho job chi tiết (nội bộ)
-    ID_STEP_PER_GROUP = 1000000      # Bước nhảy mỗi ngành để tránh trùng ID giữa ngành khác nhau
+    LOCATION_CODE = r"1001"
+    LIST_OUT_DIR = str((_OUTPUT_ROOT / "jobslist").resolve())
+    DETAIL_OUT_DIR = str((_OUTPUT_ROOT / "jobsdetail").resolve())
+    MAX_PAGES = 0
+    DELAY = 1.0
+    NO_GAIN_PATIENCE = 2
+    START_ID_BASE = 1000001
+    ID_STEP_PER_GROUP = 1000000
 
-    # Dấu thời gian chạy để tên file chi tiết mỗi lần chạy là duy nhất (tránh ghi đè)
-    # Chọn định dạng YYYY-mm-dd_HHMMSS để đảm bảo chuỗi sort được theo thời gian.
     run_ts = datetime.now().strftime("%Y-%m-%d_%H%M%S")
 
-    # Đảm bảo thư mục tồn tại (Windows path ở đây dùng backslash; đa nền tảng có thể dùng os.path.join/Path)
-    # Giữ nguyên chuỗi literal như hiện có để minh hoạ môi trường phát triển của nhóm (Windows).
     os.makedirs(LIST_OUT_DIR, exist_ok=True)
     os.makedirs(DETAIL_OUT_DIR, exist_ok=True)
 
-    summary = []  # lưu tổng kết cuối cùng: (tên ngành, path list, path detail, số dòng list, số dòng detail)
-    # Ý nghĩa: tạo báo cáo nhanh ở cuối chương trình, tiện kiểm tra không cần mở từng file.
+    summary = []
 
-    # Lặp qua tất cả ngành trong VNWORKS_GROUPS, crawl tuần tự từng ngành
-    # Lý do tuần tự: hạn chế tải lên website nguồn; nếu muốn song song phải thêm cơ chế giới hạn concurrency/rate.
     for idx, (group_name, gid) in enumerate(VNWORKS_GROUPS.items(), start=0):
         try:
             print("\n" + "="*80)
             print(f"[{idx+1}/{len(VNWORKS_GROUPS)}] NGÀNH: {group_name} (g={gid})")
 
-            # 1) Crawl danh sách link cho ngành hiện tại
-            # Truyền tham số kiểm soát hành vi (MAX_PAGES, DELAY, NO_GAIN_PATIENCE) để đảm bảo nhất quán giữa các ngành.
+            # 1) Crawl danh sách link
             rows = get_vietnamworks_jobs_by_group(
                 group_id=gid,
                 group_name=group_name,
@@ -663,8 +624,7 @@ if __name__ == "__main__":
                 no_gain_patience=NO_GAIN_PATIENCE,
             )
 
-            # 2) Lưu danh sách thành 1 file Excel/NGÀNH (đặt tên theo slug + location_code)
-            # Quy ước: mỗi ngành 1 tệp để dễ theo dõi biến động riêng ngành; downstream có thể hợp nhất khi cần.
+            # 2) Lưu danh sách (list) -> output/jobslist
             list_path = save_group_to_excel(
                 rows=rows,
                 group_name=group_name,
@@ -672,44 +632,44 @@ if __name__ == "__main__":
                 out_dir=LIST_OUT_DIR
             )
 
-            # 3) Chuẩn bị bóc chi tiết từ danh sách link (nếu có)
-            # Nếu danh sách trống, vẫn xuất 1 tệp chi tiết rỗng nhằm đảm bảo tính đầy đủ của lứa chạy.
+            # Dọn RAM của list ngay sau khi lưu
             links = [r["href"] for r in rows if r.get("href")]
-            name_slug = slugify_vn(group_name)  # dùng cho tên file chi tiết
-            # Tạo khoảng ID riêng cho mỗi ngành để tránh va chạm ID giữa các ngành
-            # Ví dụ: ngành 0 sẽ dùng [START_ID_BASE, START_ID_BASE + ID_STEP_PER_GROUP),
-            #        ngành 1 sẽ dịch sang khoảng kế tiếp, v.v.
+            del rows
+            gc.collect()
+
+            # 3) Bóc chi tiết -> ghi STREAMING ra output/jobsdetail
+            name_slug = slugify_vn(group_name)
             start_id = START_ID_BASE + idx * ID_STEP_PER_GROUP
+            detail_filename = f"job_detail_output_{name_slug}_g{gid}_{LOCATION_CODE}_{run_ts}.xlsx"
+            detail_path = os.path.join(DETAIL_OUT_DIR, detail_filename)
 
             if links:
                 print(f"[DETAIL] Bắt đầu bóc chi tiết {len(links)} link cho ngành '{group_name}'...")
-                df_detail = scrape_job_details_from_links(links, start_id=start_id)
+                # === CHANGED TO STREAMING ===
+                n_written = scrape_job_details_streaming_to_excel(
+                    job_links=links,
+                    out_xlsx_path=detail_path,
+                    start_id=start_id,
+                    batch_size=20  # có thể tăng/giảm; 10–50 là hợp lý cho t3.small
+                )
             else:
-                # Không có link -> tạo DataFrame rỗng để vẫn xuất file chi tiết cho đủ bộ
-                # Lợi ích: quy trình xử lý phía sau (đọc thư mục, hợp nhất) không phải kiểm tra ngoại lệ.
                 print(f"[DETAIL][WARN] Ngành '{group_name}' không có link nào. Tạo file chi tiết rỗng.")
-                df_detail = pd.DataFrame([])
+                # tạo file Excel rỗng với header tối thiểu
+                _append_batch_to_excel(detail_path, [], sheet_name="jobs")
+                n_written = 0
 
-            # MỖI NGÀNH 1 FILE CHI TIẾT RIÊNG (mỗi lần chạy là 1 file mới nhờ run_ts)
-            # Đặt tên: job_detail_output_{slug}_g{gid}_{LOCATION_CODE}_{run_ts}.xlsx
-            # Cấu trúc tên cho phép parser phía sau extract được slug ngành, gid, location, timestamp.
-            detail_filename = f"job_detail_output_{name_slug}_g{gid}_{LOCATION_CODE}_{run_ts}.xlsx"
-            detail_path = os.path.join(DETAIL_OUT_DIR, detail_filename)
-            df_detail.to_excel(detail_path, index=False)
-            print(f"[SAVE] {detail_path} ({len(df_detail)} dòng)")
+            # Sau khi ghi, dọn các biến tạm
+            del links
+            gc.collect()
 
-            # Lưu vào tổng kết để in cuối chương trình
-            summary.append((group_name, list_path, detail_path, len(rows), len(df_detail)))
+            summary.append((group_name, list_path, detail_path, None, n_written))
 
         except Exception as e:
-            # Bắt lỗi theo ngành để không dừng toàn bộ loop; in tên ngành + gID để dễ trace
-            # Các lỗi hay gặp: thay đổi DOM theo đợt deploy, nghẽn mạng tạm thời, CAPTCHA cục bộ.
             print(f"[ERROR] Lỗi ở ngành '{group_name}' (g={gid}): {e}")
+            gc.collect()
 
     # ==== TỔNG KẾT ====
     print("\n" + "="*80)
     print("[SUMMARY]")
     for (group_name, list_path, detail_path, n_list, n_detail) in summary:
-        # In số lượng bản ghi và đường dẫn file để tiện kiểm tra nhanh
-        # Đây là “báo cáo miệng” của chương trình, giúp giám khảo/giảng viên nắm được kết quả từng ngành ngay trên console.
-        print(f"- {group_name}: list={n_list} ({list_path}) | detail={n_detail} ({detail_path})")
+        print(f"- {group_name}: list=(saved) {list_path} | detail={n_detail} rows ({detail_path})")
