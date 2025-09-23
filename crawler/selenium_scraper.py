@@ -260,7 +260,7 @@ def get_vietnamworks_jobs_by_group(
 
     # ---- Khởi tạo Chrome WebDriver ----
     driver = create_driver()
-    wait = WebDriverWait(driver, 25)   # tăng timeout từ 12 → 25s
+    wait = WebDriverWait(driver, 25)
 
     # ---- Biến trạng thái thu thập ----
     results: List[Dict] = []      # chứa record tối thiểu cho từng job
